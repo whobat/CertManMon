@@ -16,6 +16,21 @@ services:
       # - ENTRA_CLIENT_ID=your-client-id
       # - ENTRA_CLIENT_SECRET=your-client-secret
       # - ENTRA_REDIRECT_URI=http://localhost:3000/api/auth/entra/callback
+      # Optional: SMTP / Notifications (configure in Settings panel instead)
+      # - SMTP_HOST=smtp.example.com
+      # - SMTP_PORT=587
+      # - SMTP_USER=user@example.com
+      # - SMTP_PASS=your-smtp-password
+      # - SMTP_FROM=certmanmon@example.com
+      # - SMTP_TLS=true
+      # - NOTIFICATIONS_ENABLED=false
+      # - NOTIFY_RESPONSIBLE=true
+      # - NOTIFY_RENEWAL=false
+      # - THRESHOLD_1=30
+      # - THRESHOLD_2=14
+      # - THRESHOLD_3=7
+      # - ADMIN_EMAILS=admin@example.com
+      # - APP_URL=http://localhost:3000
 
 volumes:
   certmanmon_data:

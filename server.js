@@ -128,6 +128,32 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS notification_log (id INTEGER PRIMARY K
 try { db.exec(`CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_prefix TEXT NOT NULL, permission TEXT NOT NULL DEFAULT 'read', active INTEGER NOT NULL DEFAULT 1, last_used_at TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), user_id INTEGER, username TEXT, action TEXT NOT NULL, target TEXT, details TEXT, ip TEXT)`); } catch (_) {}
 
+// Seed notification settings from environment variables (only if not already set in DB)
+{
+  const upsertIfMissing = db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING'
+  );
+  const envSettings = [
+    ['smtp_host',              process.env.SMTP_HOST],
+    ['smtp_port',              process.env.SMTP_PORT],
+    ['smtp_user',              process.env.SMTP_USER],
+    ['smtp_pass',              process.env.SMTP_PASS],
+    ['smtp_from',              process.env.SMTP_FROM],
+    ['smtp_tls',               process.env.SMTP_TLS],
+    ['notifications_enabled',  process.env.NOTIFICATIONS_ENABLED],
+    ['notify_responsible',     process.env.NOTIFY_RESPONSIBLE],
+    ['notify_renewal',         process.env.NOTIFY_RENEWAL],
+    ['threshold_1',            process.env.THRESHOLD_1],
+    ['threshold_2',            process.env.THRESHOLD_2],
+    ['threshold_3',            process.env.THRESHOLD_3],
+    ['admin_emails',           process.env.ADMIN_EMAILS],
+    ['app_url',                process.env.APP_URL],
+  ];
+  for (const [key, val] of envSettings) {
+    if (val !== undefined) upsertIfMissing.run(key, val);
+  }
+}
+
 // Seed admin user on first boot if users table is empty
 (async () => {
   const count = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;

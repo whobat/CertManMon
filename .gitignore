@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Database & runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment / secrets
+.env
+.env.*
+
+# Claude Code project files
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

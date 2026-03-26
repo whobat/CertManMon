@@ -1,0 +1,21 @@
+services:
+  certmanmon:
+    build: .
+    container_name: certmanmon
+    ports:
+      - "3000:3000"
+    volumes:
+      - certmanmon_data:/data
+    restart: unless-stopped
+    environment:
+      - AUTH_USERNAME=admin
+      - AUTH_PASSWORD=changeme
+      - SESSION_SECRET=SuperSecretSecureString
+      # Optional: Entra ID (configure in Settings panel instead)
+      # - ENTRA_TENANT_ID=your-tenant-id
+      # - ENTRA_CLIENT_ID=your-client-id
+      # - ENTRA_CLIENT_SECRET=your-client-secret
+      # - ENTRA_REDIRECT_URI=http://localhost:3000/api/auth/entra/callback
+
+volumes:
+  certmanmon_data:

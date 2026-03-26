@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CertManMon — Settings</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        CertManMon
+      </div>
+      <div class="header-right">
+        <span class="header-user" id="headerUser"></span>
+        <a href="/" class="btn btn-secondary">&#8592; Dashboard</a>
+        <button class="btn btn-secondary" id="logoutBtn">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="settings-page-header">
+      <h1>Settings</h1>
+    </div>
+
+    <div class="settings-tabs" id="settingsTabs">
+      <button class="settings-tab active" data-tab="users">Users</button>
+      <button class="settings-tab" data-tab="groups">Groups</button>
+      <button class="settings-tab" data-tab="auth">Authentication</button>
+      <button class="settings-tab" data-tab="notifications">Notifications</button>
+      <button class="settings-tab" data-tab="apikeys">API Keys</button>
+      <button class="settings-tab" data-tab="logs">Logs</button>
+    </div>
+
+    <!-- Users Tab -->
+    <div class="settings-tab-content active" id="tab-users">
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>User Accounts</h3>
+          <button class="btn btn-primary" id="addUserBtn">+ Add User</button>
+        </div>
+        <div id="usersError" class="settings-error" style="display:none"></div>
+        <div class="table-wrapper">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Role</th>
+                <th>Provider</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="usersBody">
+              <tr><td colspan="6" class="empty">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Groups Tab -->
+    <div class="settings-tab-content" id="tab-groups">
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>Certificate Groups</h3>
+          <button class="btn btn-primary" id="addGroupBtn">+ Add Group</button>
+        </div>
+        <div id="groupsError" class="settings-error" style="display:none"></div>
+        <div class="table-wrapper">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Description</th>
+                <th>Users</th>
+                <th>Certificates</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="groupsBody">
+              <tr><td colspan="5" class="empty">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Authentication Tab -->
+    <div class="settings-tab-content" id="tab-auth">
+      <div class="settings-section">
+        <h3>Local Authentication</h3>
+        <p class="settings-info-text">Local username and password authentication is always enabled. Manage local users in the Users tab.</p>
+      </div>
+
+      <div class="settings-section">
+        <h3>Microsoft Entra ID (Azure AD)</h3>
+        <p class="settings-info-text">Enable OAuth2/OIDC sign-in via Microsoft Entra ID. Users who sign in for the first time are created automatically with the Viewer role.</p>
+        <div id="entraError" class="settings-error" style="display:none"></div>
+        <div id="entraSuccess" class="settings-success" style="display:none"></div>
+        <form id="entraForm">
+          <div class="form-group">
+            <label class="toggle-label">
+              <span class="toggle-switch">
+                <input type="checkbox" id="entraEnabled" />
+                <span class="toggle-slider"></span>
+              </span>
+              Enable Microsoft Entra ID sign-in
+            </label>
+          </div>
+          <div id="entraFields">
+            <div class="form-group">
+              <label for="entraTenantId">Tenant ID</label>
+              <input type="text" id="entraTenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            </div>
+            <div class="form-group">
+              <label for="entraClientId">Client ID (Application ID)</label>
+              <input type="text" id="entraClientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            </div>
+            <div class="form-group">
+              <label for="entraClientSecret">Client Secret</label>
+              <div class="password-input-wrap">
+                <input type="password" id="entraClientSecret" placeholder="Enter client secret value" autocomplete="new-password" />
+                <button type="button" class="btn-show-password" id="entraSecretToggle" title="Show/hide secret">
+                  <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="entraRedirectUri">Redirect URI</label>
+              <input type="text" id="entraRedirectUri" placeholder="https://your-domain/api/auth/entra/callback" />
+              <div class="field-hint" id="entraRedirectHint"></div>
+            </div>
+          </div>
+          <div class="modal-actions" style="justify-content:flex-start;margin-top:8px">
+            <button type="submit" class="btn btn-primary" id="saveEntraBtn">Save Settings</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- Add/Edit User Modal -->
+  <div class="modal-overlay" id="userModalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="userModalTitle">Add User</h2>
+        <button class="modal-close" id="userModalClose">&times;</button>
+      </div>
+      <div id="userModalError" class="settings-error" style="display:none;margin-bottom:16px"></div>
+      <form id="userForm">
+        <input type="hidden" id="userId" />
+        <div class="form-group">
+          <label for="userUsername">Username *</label>
+          <input type="text" id="userUsername" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="userDisplayName">Display Name</label>
+          <input type="text" id="userDisplayName" placeholder="Full name (optional)" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="userEmail">Email *</label>
+          <input type="email" id="userEmail" required autocomplete="off" />
+        </div>
+        <div class="form-group" id="userPasswordGroup">
+          <label for="userPassword">Password <span id="userPasswordHint" class="label-hint"></span></label>
+          <div class="password-input-wrap">
+            <input type="password" id="userPassword" autocomplete="new-password" />
+            <button type="button" class="btn-show-password" id="userPasswordToggle" title="Show/hide password">
+              <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="userRole">Role *</label>
+          <select id="userRole" required>
+            <option value="viewer">Viewer — read-only access</option>
+            <option value="editor">Editor — create/edit/delete certificates</option>
+            <option value="admin">Admin — full access including user management</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="userActive">Status</label>
+          <select id="userActive">
+            <option value="1">Active</option>
+            <option value="0">Inactive</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Group Memberships <span class="label-hint">(optional)</span></label>
+          <div id="userGroupCheckList" class="group-check-list"></div>
+          <p class="field-hint" id="userGroupCheckHint" style="display:none">Loading groups...</p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="userCancelBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="userSaveBtn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Delete User Confirm Modal -->
+  <div class="modal-overlay" id="deleteUserOverlay">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>Delete User</h2>
+        <button class="modal-close" id="deleteUserClose">&times;</button>
+      </div>
+      <p id="deleteUserMsg">Are you sure you want to delete this user?</p>
+      <div id="deleteUserError" class="settings-error" style="display:none;margin-top:12px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="deleteUserCancelBtn">Cancel</button>
+        <button class="btn btn-danger" id="deleteUserConfirmBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add/Edit Group Modal -->
+  <div class="modal-overlay" id="groupModalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="groupModalTitle">Add Group</h2>
+        <button class="modal-close" id="groupModalClose">&times;</button>
+      </div>
+      <div id="groupModalError" class="settings-error" style="display:none;margin-bottom:16px"></div>
+      <form id="groupForm">
+        <input type="hidden" id="groupId" />
+        <div class="form-group">
+          <label for="groupName">Group Name *</label>
+          <input type="text" id="groupName" required autocomplete="off" placeholder="e.g. Infrastructure Team" />
+        </div>
+        <div class="form-group">
+          <label for="groupDescription">Description</label>
+          <input type="text" id="groupDescription" autocomplete="off" placeholder="Optional description" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="groupCancelBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="groupSaveBtn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Delete Group Confirm Modal -->
+  <div class="modal-overlay" id="deleteGroupOverlay">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>Delete Group</h2>
+        <button class="modal-close" id="deleteGroupClose">&times;</button>
+      </div>
+      <p id="deleteGroupMsg">Are you sure you want to delete this group?</p>
+      <div id="deleteGroupError" class="settings-error" style="display:none;margin-top:12px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="deleteGroupCancelBtn">Cancel</button>
+        <button class="btn btn-danger" id="deleteGroupConfirmBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Group Side Panel -->
+  <div class="group-panel-overlay" id="groupPanelOverlay"></div>
+  <div class="group-panel" id="groupPanel">
+    <div class="group-panel-header">
+      <div>
+        <h2 id="groupPanelName">Group Name</h2>
+        <p class="group-panel-desc" id="groupPanelDesc"></p>
+      </div>
+      <button class="modal-close" id="groupPanelClose">&times;</button>
+    </div>
+    <div class="group-panel-body">
+      <!-- Members section -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>Members</h3>
+        </div>
+        <div id="groupPanelMembers"></div>
+        <div class="group-add-row">
+          <select id="groupAddUserSelect"><option value="">— Add user —</option></select>
+          <button class="btn btn-secondary" id="groupAddUserBtn">Add</button>
+        </div>
+      </div>
+      <!-- Certificates section -->
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>Certificates</h3>
+        </div>
+        <div id="groupPanelCerts"></div>
+        <div class="group-add-row">
+          <select id="groupAddCertSelect"><option value="">— Add certificate —</option></select>
+          <button class="btn btn-secondary" id="groupAddCertBtn">Add</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+    <!-- Notifications Tab -->
+    <div class="settings-tab-content" id="tab-notifications">
+      <div class="settings-section">
+        <h3>Notification Settings</h3>
+        <p class="settings-info-text">Configure email reminders for expiring certificates. A daily check runs at 08:00. Each threshold fires once per certificate per expiry cycle.</p>
+        <div id="notifError" class="settings-error" style="display:none"></div>
+        <div id="notifSuccess" class="settings-success" style="display:none"></div>
+        <form id="notifForm">
+          <div class="form-group">
+            <label class="toggle-label">
+              <span class="toggle-switch">
+                <input type="checkbox" id="notifEnabled" />
+                <span class="toggle-slider"></span>
+              </span>
+              Enable email notifications
+            </label>
+          </div>
+
+          <h4 style="margin:20px 0 12px;color:var(--text-secondary);font-size:13px;text-transform:uppercase;letter-spacing:.05em">SMTP Server</h4>
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="smtpHost">Host</label>
+              <input type="text" id="smtpHost" placeholder="smtp.example.com" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="smtpPort">Port</label>
+              <input type="number" id="smtpPort" placeholder="587" min="1" max="65535" />
+            </div>
+          </div>
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="smtpUser">Username</label>
+              <input type="text" id="smtpUser" placeholder="user@example.com" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="smtpPass">Password</label>
+              <div class="password-input-wrap">
+                <input type="password" id="smtpPass" placeholder="SMTP password" autocomplete="new-password" />
+                <button type="button" class="btn-show-password" id="smtpPassToggle" title="Show/hide password">
+                  <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="toggle-label">
+              <span class="toggle-switch">
+                <input type="checkbox" id="smtpTls" checked />
+                <span class="toggle-slider"></span>
+              </span>
+              Require TLS / STARTTLS
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="smtpFrom">Sender (From) Address</label>
+            <input type="email" id="smtpFrom" placeholder="certmanmon@example.com" />
+          </div>
+
+          <div class="form-group">
+            <label for="appUrl">Application URL <span class="label-hint">(adds a link button to notification emails)</span></label>
+            <input type="url" id="appUrl" placeholder="https://certmanmon.example.com" autocomplete="off" />
+          </div>
+
+          <h4 style="margin:20px 0 12px;color:var(--text-secondary);font-size:13px;text-transform:uppercase;letter-spacing:.05em">Warning Thresholds</h4>
+          <p class="settings-info-text" style="margin-top:0">Send a reminder when a certificate expires within this many days. Set to 0 to disable a threshold.</p>
+          <div class="form-row-3">
+            <div class="form-group">
+              <label for="threshold1">1st Warning (days)</label>
+              <input type="number" id="threshold1" placeholder="30" min="0" />
+            </div>
+            <div class="form-group">
+              <label for="threshold2">2nd Warning (days)</label>
+              <input type="number" id="threshold2" placeholder="14" min="0" />
+            </div>
+            <div class="form-group">
+              <label for="threshold3">3rd Warning (days)</label>
+              <input type="number" id="threshold3" placeholder="7" min="0" />
+            </div>
+          </div>
+
+          <h4 style="margin:20px 0 12px;color:var(--text-secondary);font-size:13px;text-transform:uppercase;letter-spacing:.05em">Recipients</h4>
+          <div class="form-group">
+            <label for="adminEmails">Admin notification email(s)</label>
+            <input type="text" id="adminEmails" placeholder="admin@example.com, ops@example.com" />
+            <div class="field-hint">Comma-separated list of addresses that always receive alerts.</div>
+          </div>
+          <div class="form-group">
+            <label class="toggle-label">
+              <span class="toggle-switch">
+                <input type="checkbox" id="notifyResponsible" checked />
+                <span class="toggle-slider"></span>
+              </span>
+              Also notify responsible persons (matched via user accounts)
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="toggle-label">
+              <span class="toggle-switch">
+                <input type="checkbox" id="notifyRenewal" />
+                <span class="toggle-slider"></span>
+              </span>
+              Send renewal notification when a certificate's expiration date is extended
+            </label>
+          </div>
+
+          <div class="modal-actions" style="justify-content:flex-start;margin-top:8px;gap:8px">
+            <button type="submit" class="btn btn-primary" id="saveNotifBtn">Save Settings</button>
+            <button type="button" class="btn btn-secondary" id="runNowBtn">Run Check Now</button>
+          </div>
+        </form>
+
+        <div class="settings-section" style="margin-top:24px">
+          <h3>Test Email</h3>
+          <p class="settings-info-text">Send a test email to verify your SMTP settings are working. Settings must be saved first.</p>
+          <div id="notifTestError" class="settings-error" style="display:none"></div>
+          <div id="notifTestSuccess" class="settings-success" style="display:none"></div>
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <div class="form-group" style="flex:1;margin-bottom:0">
+              <label for="testEmailTo">Recipient address</label>
+              <input type="email" id="testEmailTo" placeholder="recipient@example.com" />
+            </div>
+            <button type="button" class="btn btn-secondary" id="testEmailBtn" style="flex-shrink:0">Send Test Email</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- API Keys Tab -->
+    <div class="settings-tab-content" id="tab-apikeys">
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>API Keys</h3>
+          <button class="btn btn-primary" id="addApiKeyBtn">+ Create API Key</button>
+        </div>
+        <p class="settings-info-text">Use API keys to access the CertManMon REST API from external tools and scripts. Read keys can only fetch data; Read/Write keys can also create, update, and delete certificates.</p>
+        <p class="settings-info-text">Authenticate by adding the header: <code style="background:var(--surface2);padding:2px 6px;border-radius:4px">X-API-Key: &lt;your-key&gt;</code></p>
+        <div id="apiKeysError" class="settings-error" style="display:none"></div>
+        <div class="table-wrapper">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Key Prefix</th>
+                <th>Permission</th>
+                <th>Status</th>
+                <th>Last Used</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="apiKeysBody">
+              <tr><td colspan="7" class="empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="settings-section" style="margin-top:24px">
+        <h3>Available Endpoints</h3>
+        <table class="user-table" style="font-size:13px">
+          <thead><tr><th>Method</th><th>Endpoint</th><th>Permission</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><span class="log-action-badge log-action-cert">GET</span></td><td><code>/api/v1/certificates</code></td><td>Read</td><td>List all certificates</td></tr>
+            <tr><td><span class="log-action-badge log-action-cert">GET</span></td><td><code>/api/v1/certificates/:id</code></td><td>Read</td><td>Get a single certificate</td></tr>
+            <tr><td><span class="log-action-badge log-action-notify">POST</span></td><td><code>/api/v1/certificates</code></td><td>Read/Write</td><td>Create a certificate</td></tr>
+            <tr><td><span class="log-action-badge log-action-user">PUT</span></td><td><code>/api/v1/certificates/:id</code></td><td>Read/Write</td><td>Update a certificate</td></tr>
+            <tr><td><span class="log-action-badge" style="background:rgba(239,68,68,0.12);color:#f87171">DELETE</span></td><td><code>/api/v1/certificates/:id</code></td><td>Read/Write</td><td>Delete a certificate</td></tr>
+            <tr><td><span class="log-action-badge log-action-cert">GET</span></td><td><code>/api/v1/groups</code></td><td>Read</td><td>List all groups</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Logs Tab -->
+    <div class="settings-tab-content" id="tab-logs">
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>Audit Log</h3>
+          <button class="btn btn-secondary" id="clearLogsBtn">Clear All Logs</button>
+        </div>
+        <div class="logs-toolbar">
+          <input type="text" id="logsSearch" placeholder="Search user, action, target…" style="flex:1" />
+          <select id="logsActionFilter">
+            <option value="">All actions</option>
+            <option value="auth">Authentication</option>
+            <option value="cert">Certificates</option>
+            <option value="user">Users</option>
+            <option value="group">Groups</option>
+            <option value="settings">Settings</option>
+            <option value="notify">Notifications</option>
+          </select>
+        </div>
+        <div id="logsError" class="settings-error" style="display:none"></div>
+        <div class="table-wrapper">
+          <table class="user-table" id="logsTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>Details</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody id="logsBody">
+              <tr><td colspan="6" class="empty">Select the Logs tab to load</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="logs-pagination" id="logsPagination"></div>
+      </div>
+    </div>
+
+  <!-- Create API Key Modal -->
+  <div class="modal-overlay" id="apiKeyModalOverlay">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>Create API Key</h2>
+        <button class="modal-close" id="apiKeyModalClose">&times;</button>
+      </div>
+      <div id="apiKeyModalError" class="settings-error" style="display:none;margin-bottom:16px"></div>
+      <div id="apiKeyResult" style="display:none;margin-bottom:16px">
+        <p style="color:var(--success);font-size:13px;margin:0 0 10px">Key created. Copy it now — it won't be shown again.</p>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="apiKeyValue" readonly style="flex:1;font-family:monospace;font-size:12px" />
+          <button type="button" class="btn btn-secondary" id="copyApiKeyBtn">Copy</button>
+        </div>
+      </div>
+      <form id="apiKeyForm" style="display:block">
+        <div class="form-group">
+          <label for="apiKeyName">Key Name *</label>
+          <input type="text" id="apiKeyName" placeholder="e.g. Monitoring Script" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="apiKeyPermission">Permission *</label>
+          <select id="apiKeyPermission">
+            <option value="read">Read — list and fetch certificates</option>
+            <option value="readwrite">Read/Write — full certificate management</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="apiKeyCancelBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

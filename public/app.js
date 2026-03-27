@@ -409,12 +409,12 @@ window.openEdit = function(id) {
     $('fileDrop').classList.add('file-drop-loaded');
     $('certFileInfo').textContent = '';
   }
-  // Pre-check current group ids
-  const currentGroupIds = (c.groups || []).map(g => g.id);
-  populateGroupCheckList(currentGroupIds);
   $('urlMonitorSection').style.display = '';
   loadCertUrls(c.id);
   openModal('Edit Certificate');
+  // Populate groups AFTER openModal() — openModal resets the checklist to empty
+  const currentGroupIds = (c.groups || []).map(g => g.id);
+  populateGroupCheckList(currentGroupIds);
 };
 
 window.openDelete = function(id, name) {

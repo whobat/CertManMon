@@ -30,6 +30,7 @@ async function initAuth() {
   $('headerUser').textContent = data.display_name || data.username;
   window.userRole = data.role;
   window.userRestricted = !!data.restricted;
+  checkForcePasswordChange(data);
 
   // Show settings link for admins
   if (data.role === 'admin') {
@@ -346,10 +347,35 @@ function addHostRow(hostname = '', responsible_person = '') {
   row.className = 'host-row';
   row.innerHTML = `
     <input type="text" class="host-input" placeholder="e.g. server01.example.com" value="${esc(hostname)}" />
-    <input type="text" class="person-input" placeholder="Responsible person" value="${esc(responsible_person)}" list="userSuggestions" autocomplete="off" />
+    <div style="flex:1;min-width:0">
+      <input type="text" class="person-input" placeholder="Responsible person" value="${esc(responsible_person)}" list="userSuggestions" autocomplete="off" style="width:100%" />
+      <div class="person-not-found" style="display:none;font-size:12px;color:var(--warning,#f59e0b);margin-top:3px"></div>
+    </div>
     <button type="button" class="remove-host" title="Remove">&#215;</button>
   `;
   row.querySelector('.remove-host').addEventListener('click', () => row.remove());
+
+  const personInput = row.querySelector('.person-input');
+  const hint = row.querySelector('.person-not-found');
+
+  personInput.addEventListener('blur', () => {
+    const val = personInput.value.trim();
+    if (!val) { hint.style.display = 'none'; return; }
+    const known = availableUsers.some(u =>
+      u.username.toLowerCase() === val.toLowerCase() ||
+      (u.display_name && u.display_name.toLowerCase() === val.toLowerCase())
+    );
+    if (known) { hint.style.display = 'none'; return; }
+    hint.innerHTML = `User not found. <a href="#" class="create-user-link">Create "${esc(val)}"</a>`;
+    hint.style.display = 'block';
+    hint.querySelector('.create-user-link').addEventListener('click', e => {
+      e.preventDefault();
+      openQuickCreateUser(val, personInput, hint);
+    });
+  });
+
+  personInput.addEventListener('input', () => { hint.style.display = 'none'; });
+
   $('hostList').appendChild(row);
 }
 
@@ -607,6 +633,113 @@ $('certPasswordToggle').addEventListener('click', () => {
   input.type = showing ? 'password' : 'text';
   $('certPasswordToggle').querySelector('.icon-eye').style.display = showing ? '' : 'none';
   $('certPasswordToggle').querySelector('.icon-eye-off').style.display = showing ? 'none' : '';
+});
+
+// --- Quick Create User ---
+let quickUserTargetInput = null;
+let quickUserTargetHint = null;
+
+function populateQuickUserGroups() {
+  const container = $('quickUserGroupList');
+  if (!availableGroups.length) {
+    container.innerHTML = '<span style="font-size:13px;color:var(--text-muted)">No groups defined</span>';
+    return;
+  }
+  container.innerHTML = availableGroups.map(g => `
+    <label class="group-check-item">
+      <input type="checkbox" name="quickUserGroup" value="${g.id}" />
+      <span>${esc(g.name)}${g.restricted ? ' <span class="badge-restricted">System</span>' : ''}</span>
+    </label>
+  `).join('');
+}
+
+function getQuickUserGroupIds() {
+  return Array.from($('quickUserGroupList').querySelectorAll('input[name="quickUserGroup"]:checked'))
+    .map(cb => parseInt(cb.value, 10));
+}
+
+function openQuickCreateUser(prefill, inputEl, hintEl) {
+  quickUserTargetInput = inputEl;
+  quickUserTargetHint = hintEl;
+  $('quickUserUsername').value = prefill;
+  $('quickUserDisplayName').value = '';
+  $('quickUserEmail').value = '';
+  $('quickUserRole').value = 'viewer';
+  $('quickUserError').style.display = 'none';
+  populateQuickUserGroups();
+  $('quickUserOverlay').classList.add('open');
+  $('quickUserEmail').focus();
+}
+
+function closeQuickUserModal() {
+  $('quickUserOverlay').classList.remove('open');
+  $('quickUserForm').reset();
+  $('quickUserError').style.display = 'none';
+  quickUserTargetInput = null;
+  quickUserTargetHint = null;
+}
+
+$('quickUserClose').addEventListener('click', closeQuickUserModal);
+$('quickUserCancelBtn').addEventListener('click', closeQuickUserModal);
+$('quickUserOverlay').addEventListener('click', e => { if (e.target === $('quickUserOverlay')) closeQuickUserModal(); });
+
+$('quickUserForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const errEl = $('quickUserError');
+  errEl.style.display = 'none';
+
+  const username = $('quickUserUsername').value.trim();
+  const display_name = $('quickUserDisplayName').value.trim();
+  const email = $('quickUserEmail').value.trim();
+  const role = $('quickUserRole').value;
+
+  // Generate a password server-side by sending a random one; user must change on first login
+  const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*';
+  const arr = new Uint8Array(14);
+  crypto.getRandomValues(arr);
+  const password = Array.from(arr, b => chars[b % chars.length]).join('');
+
+  const btn = $('quickUserSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+
+  const res = await fetch('/api/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, display_name, email, password, role, auth_provider: 'local', active: 1 })
+  });
+  const data = await res.json();
+  btn.disabled = false;
+  btn.textContent = 'Create User';
+
+  if (!res.ok) {
+    errEl.textContent = data.error || 'Failed to create user';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  // Assign selected groups
+  const groupIds = getQuickUserGroupIds();
+  if (groupIds.length) {
+    await fetch(`/api/users/${data.id}/groups`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_ids: groupIds })
+    });
+  }
+
+  // Add to local suggestions and datalist
+  availableUsers.push({ username: data.username, display_name: data.display_name, email: data.email });
+  const dl = $('userSuggestions');
+  dl.innerHTML = availableUsers.map(u =>
+    `<option value="${esc(u.username)}">${esc(u.email)}</option>`
+  ).join('');
+
+  // Fill the triggering input and hide the hint
+  if (quickUserTargetInput) quickUserTargetInput.value = data.username;
+  if (quickUserTargetHint) quickUserTargetHint.style.display = 'none';
+
+  closeQuickUserModal();
 });
 
 // Initial load

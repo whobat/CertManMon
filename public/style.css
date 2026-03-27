@@ -396,7 +396,7 @@ td.empty {
 
 .host-row input:focus { border-color: var(--primary); }
 
-.host-row .person-input { flex: 0.7; }
+.host-row .person-input { width: 100%; }
 
 .host-row .remove-host {
   background: none;
@@ -411,6 +411,9 @@ td.empty {
 }
 
 .host-row .remove-host:hover { color: var(--danger); border-color: var(--danger); }
+
+.person-not-found { line-height: 1.4; }
+.person-not-found .create-user-link { color: var(--primary); text-decoration: underline; cursor: pointer; }
 
 .modal-actions {
   display: flex;

@@ -16,7 +16,13 @@ const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || '/data/certs.db';
 const AUTH_USERNAME = process.env.AUTH_USERNAME || 'admin';
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'changeme';
+if (!process.env.AUTH_PASSWORD || process.env.AUTH_PASSWORD === 'changeme') {
+  console.warn('WARNING: AUTH_PASSWORD is not set or is the insecure default "changeme". Set the AUTH_PASSWORD environment variable before going to production.');
+}
 const SESSION_SECRET = process.env.SESSION_SECRET || randomBytes(32).toString('hex');
+if (!process.env.SESSION_SECRET) {
+  console.warn('WARNING: SESSION_SECRET is not set. A random secret is being used — all sessions will be invalidated on every restart. Set SESSION_SECRET in your environment.');
+}
 
 // Ensure data directory exists
 const dbDir = path.dirname(DB_PATH);
@@ -52,6 +58,7 @@ db.exec(`
     auth_provider TEXT NOT NULL DEFAULT 'local',
     entra_oid TEXT,
     active INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     last_login_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
@@ -138,6 +145,7 @@ try { db.exec(`ALTER TABLE certificates ADD COLUMN password TEXT NOT NULL DEFAUL
 try { db.exec(`ALTER TABLE certificates ADD COLUMN note TEXT NOT NULL DEFAULT ''`); } catch (_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`); } catch (_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN last_login_at TEXT`); } catch (_) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS cert_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', restricted INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
 try { db.exec(`ALTER TABLE cert_groups ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS cert_group_members (group_id INTEGER NOT NULL, certificate_id INTEGER NOT NULL, PRIMARY KEY (group_id, certificate_id), FOREIGN KEY (group_id) REFERENCES cert_groups(id) ON DELETE CASCADE, FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)`); } catch (_) {}
@@ -211,16 +219,42 @@ function addToDefaultViewers(userId) {
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
 app.use(express.json());
+
+// Security headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
 app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { httpOnly: true, sameSite: 'lax' }
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production'
+  }
 }));
 
 // --- Auth middleware ---
+const CHANGE_PASSWORD_EXEMPT = new Set([
+  '/api/auth/me', '/api/auth/change-password', '/api/auth/logout', '/api/version'
+]);
+
 function requireAuth(req, res, next) {
-  if (req.session && req.session.userId) return next();
+  if (req.session && req.session.userId) {
+    // Block API calls (except exempt paths) if user must change their password
+    if (req.path.startsWith('/api/') && !CHANGE_PASSWORD_EXEMPT.has(req.path)) {
+      const user = db.prepare('SELECT must_change_password FROM users WHERE id = ?').get(req.session.userId);
+      if (user && user.must_change_password) {
+        return res.status(403).json({ error: 'password_change_required' });
+      }
+    }
+    return next();
+  }
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 }
@@ -235,11 +269,60 @@ function requireRole(...roles) {
   ];
 }
 
+// --- Login rate limiting ---
+const loginAttempts = new Map(); // ip -> { count, resetAt }
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 1, resetAt: now + LOGIN_WINDOW_MS };
+    loginAttempts.set(ip, entry);
+    return true;
+  }
+  entry.count++;
+  return entry.count <= LOGIN_MAX_ATTEMPTS;
+}
+
+// Periodically clean up expired entries to avoid memory growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now > entry.resetAt) loginAttempts.delete(ip);
+  }
+}, LOGIN_WINDOW_MS);
+
+// --- HTML escaping for email templates ---
+function htmlEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
+// --- Certificate field validation ---
+function validateCertFields(name, fqdn, expiration_date) {
+  if (!name || typeof name !== 'string' || name.trim().length === 0 || name.length > 255) {
+    return 'name must be a non-empty string under 255 characters';
+  }
+  if (!fqdn || typeof fqdn !== 'string' || fqdn.trim().length === 0 || fqdn.length > 255) {
+    return 'fqdn must be a non-empty string under 255 characters';
+  }
+  if (!expiration_date || !/^\d{4}-\d{2}-\d{2}$/.test(expiration_date) || isNaN(Date.parse(expiration_date))) {
+    return 'expiration_date must be a valid date in YYYY-MM-DD format';
+  }
+  return null;
+}
+
 // --- Audit logging ---
 function logEvent(req, action, target = '', details = '') {
   const userId = req.session && req.session.userId ? req.session.userId : null;
   const username = req.session && req.session.username ? req.session.username : 'system';
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
+  const ip = req.socket?.remoteAddress || '';
   try {
     db.prepare('INSERT INTO audit_log (user_id, username, action, target, details, ip) VALUES (?, ?, ?, ?, ?, ?)')
       .run(userId, username, action, target || '', details || '', ip);
@@ -269,8 +352,18 @@ app.get('/api/auth/providers', (req, res) => {
 
 // Local login
 app.post('/api/auth/login', async (req, res) => {
+  const clientIp = req.socket?.remoteAddress || '';
+  if (!checkLoginRateLimit(clientIp)) {
+    return res.status(429).json({ error: 'Too many login attempts. Please try again in 15 minutes.' });
+  }
+
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password are required' });
+
+  // Guard against bcrypt DoS with excessively long passwords
+  if (typeof password === 'string' && password.length > 1024) {
+    return res.status(400).json({ error: 'Invalid credentials' });
+  }
 
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND auth_provider = ? AND active = 1').get(username, 'local');
   if (!user) {
@@ -429,9 +522,23 @@ app.get('/api/auth/entra/callback', async (req, res) => {
 
 // Auth info (requires auth)
 app.get('/api/auth/me', requireAuth, (req, res) => {
-  const user = db.prepare('SELECT id, username, display_name, email, role FROM users WHERE id = ?').get(req.session.userId);
+  const user = db.prepare('SELECT id, username, display_name, email, role, must_change_password FROM users WHERE id = ?').get(req.session.userId);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   res.json({ ...user, restricted: isRestrictedViewer(req.session.userId, req.session.userRole) });
+});
+
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
+  const { new_password } = req.body;
+  if (!new_password || new_password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+  if (new_password.length > 1024) {
+    return res.status(400).json({ error: 'Password must be under 1024 characters' });
+  }
+  const hash = await bcrypt.hash(new_password, 12);
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, req.session.userId);
+  logEvent(req, 'user.change_password', req.session.username, 'self');
+  res.json({ ok: true });
 });
 
 // --- User management routes (admin only) ---
@@ -452,12 +559,16 @@ app.post('/api/users', ...requireRole('admin'), async (req, res) => {
   if (auth_provider === 'local' && !password) {
     return res.status(400).json({ error: 'Password is required for local users' });
   }
+  if (password && password.length > 1024) {
+    return res.status(400).json({ error: 'Password must be under 1024 characters' });
+  }
 
   try {
     const password_hash = password ? await bcrypt.hash(password, 12) : null;
+    const mustChange = auth_provider === 'local' ? 1 : 0;
     const info = db.prepare(
-      'INSERT INTO users (username, display_name, email, password_hash, role, auth_provider, active) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(username, display_name, email, password_hash, role, auth_provider, active ? 1 : 0);
+      'INSERT INTO users (username, display_name, email, password_hash, role, auth_provider, active, must_change_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(username, display_name, email, password_hash, role, auth_provider, active ? 1 : 0, mustChange);
     const user = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, last_login_at, created_at FROM users WHERE id = ?').get(info.lastInsertRowid);
     if (user.role !== 'admin') addToDefaultViewers(user.id);
     res.status(201).json(user);
@@ -549,7 +660,7 @@ app.patch('/api/users/:id/active', ...requireRole('admin'), (req, res) => {
 // GET /api/users/suggestions — username + email for autocomplete (any authenticated user)
 app.get('/api/users/suggestions', requireAuth, (req, res) => {
   const users = db.prepare(
-    "SELECT username, email FROM users WHERE active = 1 ORDER BY username ASC"
+    "SELECT username, display_name, email FROM users WHERE active = 1 ORDER BY username ASC"
   ).all();
   res.json(users);
 });
@@ -1046,7 +1157,7 @@ function extractCertMeta(pem) {
 }
 
 // Parse a PFX/PKCS12 buffer, return PEM of the leaf certificate
-function parsePfx(buffer, password = '') {
+async function parsePfx(buffer, password = '') {
   const p12Der = buffer.toString('binary');
   let p12Asn1;
   try {
@@ -1054,27 +1165,147 @@ function parsePfx(buffer, password = '') {
   } catch {
     throw new Error('File is not a valid PFX/PKCS#12 file');
   }
-  let p12;
-  try {
-    p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password);
-  } catch (e) {
-    const msg = e.message || '';
-    if (msg.includes('MAC') || msg.includes('mac') || msg.includes('password') || msg.includes('decrypt')) {
-      const err = new Error('Incorrect password');
-      err.needsPassword = true;
-      throw err;
+
+  // Try node-forge first (fast, no network).
+  // Attempt strict=true then strict=false (skips SHA-256 MAC check on modern PFX).
+  for (const strict of [true, false]) {
+    try {
+      const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, strict, password);
+      const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
+      if (certBags.length === 0) throw new Error('No certificates found in PFX file');
+      const leaf = certBags.find(b => !b.cert.basicConstraints?.cA) || certBags[0];
+      return forge.pki.certificateToPem(leaf.cert);
+    } catch (e) {
+      if (!strict) break; // both modes failed — fall through to native path
     }
-    throw e;
   }
-  const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] || [];
-  if (certBags.length === 0) throw new Error('No certificates found in PFX file');
-  // Pick the leaf cert (not a CA) if possible
-  const leaf = certBags.find(b => !b.cert.basicConstraints?.cA) || certBags[0];
-  return forge.pki.certificateToPem(leaf.cert);
+
+  // node-forge couldn't parse it (common with modern Windows PFX using SHA-256 MAC or AES).
+  // Validate the password using Node's built-in TLS (uses the bundled OpenSSL — no system binary needed).
+  try {
+    tls.createSecureContext({ pfx: buffer, passphrase: password });
+  } catch {
+    const err = new Error('Incorrect password');
+    err.needsPassword = true;
+    throw err;
+  }
+
+  // Password is valid. Walk the PFX ASN.1 structure directly to extract cert bags.
+  // In Windows-generated PFX files cert bags live in a plain (unencrypted) ContentInfo,
+  // so they can be read without any decryption or network handshake.
+  const pem = extractCertFromPfxAsn1(p12Asn1);
+  if (pem) return pem;
+
+  // Final fallback: loopback TLS handshake.
+  return extractCertViaTlsServer(buffer, password);
+}
+
+// Walk the PFX ASN.1 tree and pull cert DER bytes from any plain (unencrypted) SafeContents.
+// Windows-generated PFX files store cert bags in unencrypted ContentInfo; only the key bag
+// is password-encrypted. This lets us extract the cert without any decryption at all.
+function extractCertFromPfxAsn1(p12Asn1) {
+  const OID_DATA      = '1.2.840.113549.1.7.1';
+  const OID_CERT_BAG  = '1.2.840.113549.1.12.10.1.3';
+  const OID_X509_CERT = '1.2.840.113549.1.9.22.1';
+
+  try {
+    // PFX SEQUENCE: [version, authSafeContentInfo, macData?]
+    const authSafeCI = p12Asn1.value[1];
+    if (forge.asn1.derToOid(authSafeCI.value[0].value) !== OID_DATA) return null;
+
+    // authSafe [0] OCTET STRING → AuthenticatedSafe SEQUENCE OF ContentInfo
+    const authSafe = forge.asn1.fromDer(authSafeCI.value[1].value[0].value);
+
+    const certDers = [];
+    for (const ci of authSafe.value) {
+      if (forge.asn1.derToOid(ci.value[0].value) !== OID_DATA) continue; // skip encrypted
+
+      // Plain data ContentInfo: [0] OCTET STRING → SafeContents
+      const sc = forge.asn1.fromDer(ci.value[1].value[0].value);
+      for (const bag of sc.value) {
+        try {
+          if (forge.asn1.derToOid(bag.value[0].value) !== OID_CERT_BAG) continue;
+          // CertBag: [0] → SEQUENCE { certId OID, certValue [0] OCTET STRING }
+          const certBag = bag.value[1].value[0];
+          if (forge.asn1.derToOid(certBag.value[0].value) !== OID_X509_CERT) continue;
+          certDers.push(certBag.value[1].value[0].value); // binary DER string
+        } catch (_) {}
+      }
+    }
+
+    if (certDers.length === 0) return null;
+
+    // Prefer leaf cert (not a CA)
+    let chosen = certDers[0];
+    for (const der of certDers) {
+      try {
+        const cert = forge.pki.certificateFromAsn1(forge.asn1.fromDer(der));
+        const bc = cert.getExtension('basicConstraints');
+        if (!bc || !bc.cA) { chosen = der; break; }
+      } catch (_) {}
+    }
+
+    const b64 = Buffer.from(chosen, 'binary').toString('base64').match(/.{1,64}/g).join('\n');
+    return `-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`;
+  } catch {
+    return null;
+  }
+}
+
+// Start a loopback TLS server from the PFX and connect a TLS client to extract the leaf certificate.
+// Using a proper TLS client (rather than raw TCP) means the handshake completes correctly
+// regardless of TLS version (1.2 or 1.3) or key/cipher type.
+function extractCertViaTlsServer(pfxBuffer, password) {
+  return new Promise((resolve, reject) => {
+    let server, client;
+    const cleanup = () => {
+      try { client?.destroy(); } catch (_) {}
+      try { server?.close(); } catch (_) {}
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('Certificate extraction timed out')); }, 10000);
+
+    // SECLEVEL=0 allows legacy key sizes (e.g. short RSA) that some PFX files contain.
+    // This is safe here because the server is a loopback-only ephemeral instance.
+    const PFX_TLS_OPTS = { ciphers: 'ALL:@SECLEVEL=0', minVersion: 'TLSv1.2' };
+
+    const ctx = tls.createSecureContext({ pfx: pfxBuffer, passphrase: password });
+    server = tls.createServer({ secureContext: ctx, ...PFX_TLS_OPTS }, () => {});
+    server.on('error', () => {});
+
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      let resolved = false;
+
+      // Use a proper TLS client so the handshake completes regardless of TLS version or cipher.
+      // rejectUnauthorized:false accepts any certificate — safe because this is a loopback server
+      // we just created ourselves.
+      client = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false, ...PFX_TLS_OPTS }, () => {
+        try {
+          const peerCert = client.getPeerCertificate();
+          client.destroy();
+          if (!peerCert || !peerCert.raw) {
+            if (!resolved) { clearTimeout(timer); cleanup(); reject(new Error('No certificate received from TLS server')); }
+            return;
+          }
+          resolved = true;
+          clearTimeout(timer);
+          cleanup();
+          const b64 = peerCert.raw.toString('base64').match(/.{1,64}/g).join('\n');
+          resolve(`-----BEGIN CERTIFICATE-----\n${b64}\n-----END CERTIFICATE-----\n`);
+        } catch (e) {
+          if (!resolved) { clearTimeout(timer); cleanup(); reject(e); }
+        }
+      });
+
+      client.on('error', (e) => {
+        if (!resolved) { clearTimeout(timer); cleanup(); reject(e); }
+      });
+    });
+  });
 }
 
 // Parse a certificate file and return metadata (must be before /:id)
-app.post('/api/certificates/parse', requireAuth, upload.single('cert'), (req, res) => {
+app.post('/api/certificates/parse', requireAuth, upload.single('cert'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   try {
     const isPem = req.file.buffer.slice(0, 10).toString('ascii').startsWith('-----');
@@ -1085,7 +1316,7 @@ app.post('/api/certificates/parse', requireAuth, upload.single('cert'), (req, re
     } else {
       // PFX / PKCS#12
       const password = req.body.password || '';
-      pem = parsePfx(req.file.buffer, password);
+      pem = await parsePfx(req.file.buffer, password);
     }
 
     const meta = extractCertMeta(pem);
@@ -1112,19 +1343,47 @@ app.get('/api/certificates/:id/download', requireAuth, (req, res) => {
 });
 
 app.get('/api/certificates/:id', requireAuth, (req, res) => {
-  const cert = db.prepare('SELECT * FROM certificates WHERE id = ?').get(req.params.id);
+  const certId = req.params.id;
+  const restricted = isRestrictedViewer(req.session.userId, req.session.userRole);
+  const isAdmin = req.session.userRole === 'admin';
+
+  // Enforce the same group visibility rules as the list endpoint
+  const canAccess = db.prepare(`
+    SELECT 1 FROM certificates c
+    WHERE c.id = ?
+      AND (
+        ? = 'admin'
+        OR ? = 1
+        OR EXISTS (
+          SELECT 1 FROM cert_group_members x
+          JOIN user_group_members ugm ON ugm.group_id = x.group_id
+          WHERE x.certificate_id = c.id AND ugm.user_id = ?
+        )
+      )
+  `).get(certId, req.session.userRole, restricted ? 1 : 0, req.session.userId);
+
+  if (!canAccess) return res.status(404).json({ error: 'Not found' });
+
+  const cert = db.prepare('SELECT * FROM certificates WHERE id = ?').get(certId);
   if (!cert) return res.status(404).json({ error: 'Not found' });
 
-  const hosts = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(req.params.id);
-  const groups = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(req.params.id);
-  res.json({ ...cert, has_cert: !!cert.cert_data, cert_data: undefined, hosts, groups });
+  const hosts = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(certId);
+  const groups = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(certId);
+  res.json({
+    ...cert,
+    password: (isAdmin || !restricted) ? cert.password : '',
+    has_cert: !!cert.cert_data,
+    cert_data: undefined,
+    hosts,
+    groups
+  });
 });
 
 app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
   const { name, fqdn, expiration_date, password = '', note = '', cert_data = null, hosts = [], group_ids = [] } = req.body;
-  if (!name || !fqdn || !expiration_date) {
-    return res.status(400).json({ error: 'name, fqdn, and expiration_date are required' });
-  }
+  const validationError = validateCertFields(name, fqdn, expiration_date);
+  if (validationError) return res.status(400).json({ error: validationError });
+  if (note && note.length > 1000) return res.status(400).json({ error: 'note must be under 1000 characters' });
 
   const insert = db.prepare('INSERT INTO certificates (name, fqdn, expiration_date, password, note, cert_data) VALUES (?, ?, ?, ?, ?, ?)');
   const insertHost = db.prepare('INSERT INTO hosts (certificate_id, hostname, responsible_person) VALUES (?, ?, ?)');
@@ -1155,6 +1414,10 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
 app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, res) => {
   const { name, fqdn, expiration_date, password = '', note = '', cert_data, hosts = [], group_ids = [] } = req.body;
   const id = req.params.id;
+
+  const validationError = validateCertFields(name, fqdn, expiration_date);
+  if (validationError) return res.status(400).json({ error: validationError });
+  if (note && note.length > 1000) return res.status(400).json({ error: 'note must be under 1000 characters' });
 
   const cert = db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
   if (!cert) return res.status(404).json({ error: 'Not found' });
@@ -1346,7 +1609,7 @@ async function sendWelcomeEmail(username, display_name, email, password, role, a
     : '';
 
   const credentialsRow = password
-    ? `<tr><td style="padding:6px 0;color:#94a3b8;width:140px">Password</td><td style="padding:6px 0;font-family:monospace;background:#1a1f2e;padding:4px 8px;border-radius:4px">${password}</td></tr>`
+    ? `<tr><td style="padding:6px 0;color:#94a3b8;width:140px">Password</td><td style="padding:6px 0;font-family:monospace;background:#1a1f2e;padding:4px 8px;border-radius:4px">${htmlEsc(password)}</td></tr>`
     : `<tr><td style="padding:6px 0;color:#94a3b8;width:140px">Password</td><td style="padding:6px 0;color:#94a3b8">Set by your administrator</td></tr>`;
 
   const html = `
@@ -1359,13 +1622,13 @@ async function sendWelcomeEmail(username, display_name, email, password, role, a
       <h2 style="margin:0;color:#fff;font-size:18px">Welcome to CertManMon</h2>
     </div>
     <div style="padding:24px">
-      <p style="margin:0 0 16px">${display_name ? `Hi ${display_name},<br><br>` : ''}Your account has been created. Here are your login credentials:</p>
+      <p style="margin:0 0 16px">${display_name ? `Hi ${htmlEsc(display_name)},<br><br>` : ''}Your account has been created. Here are your login credentials:</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Username</td><td style="padding:6px 0"><strong>${username}</strong></td></tr>
-        ${display_name ? `<tr><td style="padding:6px 0;color:#94a3b8">Name</td><td style="padding:6px 0">${display_name}</td></tr>` : ''}
-        <tr><td style="padding:6px 0;color:#94a3b8">Email</td><td style="padding:6px 0">${email}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Username</td><td style="padding:6px 0"><strong>${htmlEsc(username)}</strong></td></tr>
+        ${display_name ? `<tr><td style="padding:6px 0;color:#94a3b8">Name</td><td style="padding:6px 0">${htmlEsc(display_name)}</td></tr>` : ''}
+        <tr><td style="padding:6px 0;color:#94a3b8">Email</td><td style="padding:6px 0">${htmlEsc(email)}</td></tr>
         ${credentialsRow}
-        <tr><td style="padding:6px 0;color:#94a3b8">Role</td><td style="padding:6px 0">${roleLabels[role] || role}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">Role</td><td style="padding:6px 0">${htmlEsc(roleLabels[role] || role)}</td></tr>
       </table>
       ${loginBtn}
       <p style="margin:20px 0 0;font-size:12px;color:#64748b">If you did not expect this email, please contact your administrator.</p>
@@ -1429,10 +1692,10 @@ async function sendRenewalNotification(certId, certName, fqdn, oldExpiry, newExp
     <div style="padding:24px">
       <p style="margin:0 0 16px">The following certificate has been renewed:</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${certName}</strong></td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${fqdn}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">Previous Expiry</td><td style="padding:6px 0;color:#f87171">${oldExpiry}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">New Expiry</td><td style="padding:6px 0;color:#4ade80"><strong>${newExpiry}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${htmlEsc(fqdn)}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">Previous Expiry</td><td style="padding:6px 0;color:#f87171">${htmlEsc(oldExpiry)}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">New Expiry</td><td style="padding:6px 0;color:#4ade80"><strong>${htmlEsc(newExpiry)}</strong></td></tr>
       </table>
       ${linkBtn}
       <p style="margin:20px 0 0;font-size:12px;color:#64748b">This notification was sent by CertManMon.</p>
@@ -1495,9 +1758,9 @@ function buildEmailHtml(certName, fqdn, expirationDate, daysLeft, thresholdDays,
     <div style="padding:24px">
       <p style="margin:0 0 16px">The following certificate will expire in <strong style="color:${color}">${daysLeft} day${daysLeft !== 1 ? 's' : ''}</strong> (threshold: ${thresholdDays} days):</p>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${certName}</strong></td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${fqdn}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">Expiration Date</td><td style="padding:6px 0;color:${color}"><strong>${expirationDate}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${htmlEsc(fqdn)}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">Expiration Date</td><td style="padding:6px 0;color:${color}"><strong>${htmlEsc(expirationDate)}</strong></td></tr>
       </table>
       ${linkBtn}
       <p style="margin:20px 0 0;font-size:12px;color:#64748b">This notification was sent by CertManMon.</p>
@@ -1648,9 +1911,10 @@ cron.schedule('*/30 * * * *', () => {
 // --- Audit log routes ---
 
 app.get('/api/logs', ...requireRole('admin'), (req, res) => {
-  const { page = 1, limit = 50, action = '', search = '' } = req.query;
-  const offset = (parseInt(page, 10) - 1) * parseInt(limit, 10);
-  const pageSize = Math.min(parseInt(limit, 10), 200);
+  const { action = '', search = '' } = req.query;
+  const pageNum = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(Math.max(1, parseInt(req.query.limit, 10) || 50), 200);
+  const offset = (pageNum - 1) * pageSize;
 
   let where = '1=1';
   const params = [];
@@ -1668,7 +1932,7 @@ app.get('/api/logs', ...requireRole('admin'), (req, res) => {
   const total = db.prepare(`SELECT COUNT(*) AS c FROM audit_log WHERE ${where}`).get(...params).c;
   const rows = db.prepare(`SELECT * FROM audit_log WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, offset);
 
-  res.json({ total, page: parseInt(page, 10), limit: pageSize, rows });
+  res.json({ total, page: pageNum, limit: pageSize, rows });
 });
 
 app.delete('/api/logs', ...requireRole('admin'), (req, res) => {

@@ -15,6 +15,7 @@ async function initAuth() {
   const data = await res.json();
   if (data.role !== 'admin') { window.location.href = '/'; return; }
   $('headerUser').textContent = data.display_name || data.username;
+  checkForcePasswordChange(data);
 }
 
 $('logoutBtn').addEventListener('click', async () => {
@@ -155,17 +156,30 @@ function getSelectedUserGroupIds() {
     .map(cb => parseInt(cb.value, 10));
 }
 
+function generatePassword() {
+  const chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*';
+  const arr = new Uint8Array(14);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => chars[b % chars.length]).join('');
+}
+
 async function openAddUser() {
   editUserMode = false;
   $('userId').value = '';
   $('userForm').reset();
   $('userModalTitle').textContent = 'Add User';
-  $('userPasswordHint').textContent = '*';
   $('userPassword').required = true;
   $('userModalError').style.display = 'none';
-  $('userPassword').type = 'password';
-  $('userPasswordToggle').querySelector('.icon-eye').style.display = '';
-  $('userPasswordToggle').querySelector('.icon-eye-off').style.display = 'none';
+
+  // Auto-generate password and show it in plaintext
+  const pw = generatePassword();
+  $('userPassword').value = pw;
+  $('userPassword').type = 'text';
+  $('userPasswordHint').innerHTML = '* <span style="color:var(--text-muted);font-weight:400">auto-generated</span>';
+  $('userPasswordToggle').querySelector('.icon-eye').style.display = 'none';
+  $('userPasswordToggle').querySelector('.icon-eye-off').style.display = '';
+  $('userPwGenBtn').style.display = '';
+  $('userPwCopyBtn').style.display = '';
 
   // Refresh groups list then populate with nothing selected
   const gRes = await fetch('/api/groups');
@@ -181,6 +195,9 @@ window.openEditUser = async function(id) {
   $('userPassword').type = 'password';
   $('userPasswordToggle').querySelector('.icon-eye').style.display = '';
   $('userPasswordToggle').querySelector('.icon-eye-off').style.display = 'none';
+  $('userPwGenBtn').style.display = 'none';
+  $('userPwCopyBtn').style.display = 'none';
+  $('userPasswordHint').textContent = '(leave blank to keep current)';
 
   const [usersRes, gRes, userGroupsRes] = await Promise.all([
     fetch('/api/users'),
@@ -238,6 +255,23 @@ $('addUserBtn').addEventListener('click', () => openAddUser());
 $('userModalClose').addEventListener('click', closeUserModal);
 $('userCancelBtn').addEventListener('click', closeUserModal);
 $('userModalOverlay').addEventListener('click', e => { if (e.target === $('userModalOverlay')) closeUserModal(); });
+
+$('userPwGenBtn').addEventListener('click', () => {
+  const pw = generatePassword();
+  $('userPassword').value = pw;
+  $('userPassword').type = 'text';
+  $('userPasswordToggle').querySelector('.icon-eye').style.display = 'none';
+  $('userPasswordToggle').querySelector('.icon-eye-off').style.display = '';
+});
+
+$('userPwCopyBtn').addEventListener('click', async () => {
+  const pw = $('userPassword').value;
+  if (!pw) return;
+  await navigator.clipboard.writeText(pw);
+  const btn = $('userPwCopyBtn');
+  btn.textContent = '✓ Copied';
+  setTimeout(() => { btn.innerHTML = '&#128203; Copy'; }, 1500);
+});
 
 $('userPasswordToggle').addEventListener('click', () => {
   const input = $('userPassword');
@@ -332,7 +366,9 @@ async function loadEntraSettings() {
   $('entraEnabled').checked = data.entra_enabled === 'true';
   $('entraTenantId').value = data.entra_tenant_id || '';
   $('entraClientId').value = data.entra_client_id || '';
-  $('entraClientSecret').value = data.entra_client_secret || '';
+  // Never pre-fill the secret; show a placeholder indicating whether one is saved
+  $('entraClientSecret').value = '';
+  $('entraClientSecret').placeholder = data.entra_client_secret ? '(saved — enter new value to change)' : 'Enter client secret';
   $('entraRedirectUri').value = data.entra_redirect_uri || '';
 
   // Auto-suggest redirect URI

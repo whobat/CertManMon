@@ -160,6 +160,50 @@
   </div>
 
   <datalist id="userSuggestions"></datalist>
+
+  <!-- Quick Create User Modal -->
+  <div class="modal-overlay" id="quickUserOverlay">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h2>Create User</h2>
+        <button class="modal-close" id="quickUserClose">&times;</button>
+      </div>
+      <p style="margin:-8px 0 16px;font-size:13px;color:var(--text-secondary)">This user will be required to set a new password on first login.</p>
+      <div id="quickUserError" class="settings-error" style="display:none;margin-bottom:14px"></div>
+      <form id="quickUserForm">
+        <div class="form-group">
+          <label for="quickUserUsername">Username *</label>
+          <input type="text" id="quickUserUsername" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="quickUserDisplayName">Display Name</label>
+          <input type="text" id="quickUserDisplayName" autocomplete="off" placeholder="Full name (optional)" />
+        </div>
+        <div class="form-group">
+          <label for="quickUserEmail">Email *</label>
+          <input type="email" id="quickUserEmail" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="quickUserRole">Role *</label>
+          <select id="quickUserRole">
+            <option value="viewer">Viewer</option>
+            <option value="editor">Editor</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="form-group" id="quickUserGroupsGroup">
+          <label>Group Memberships <span class="label-hint">(optional)</span></label>
+          <div id="quickUserGroupList" class="group-check-list"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="quickUserCancelBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="quickUserSaveBtn">Create User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="force-pw.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

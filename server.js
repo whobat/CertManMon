@@ -1050,6 +1050,7 @@ app.put('/api/v1/certificates/:id', requireApiKey('readwrite'), async (req, res)
     v1AssignedPersons.get(u).push(hn);
   }
   sendCertAssignmentEmails(name, fqdn, expiration_date, v1AssignedPersons).catch(() => {});
+  sendCertUpdateNotification(id, updated.name, updated.fqdn, updated.expiration_date).catch(() => {});
 
   if (expiration_date && expiration_date > oldExpiry) {
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(() => {});
@@ -1523,6 +1524,9 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   sendCertAssignmentEmails(name, fqdn, expiration_date, assignedPersons).catch(err =>
     console.error('[notify] Assignment notification error:', err.message)
   );
+  sendCertUpdateNotification(id, updated.name, updated.fqdn, updated.expiration_date).catch(err =>
+    console.error('[notify] Update notification error:', err.message)
+  );
 
   if (expiration_date && expiration_date > oldExpiry) {
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(err =>
@@ -1666,6 +1670,70 @@ async function runAllUrlChecks() {
   const certIds = db.prepare('SELECT DISTINCT certificate_id FROM cert_urls').all();
   for (const row of certIds) {
     await runUrlChecksForCert(row.certificate_id);
+  }
+}
+
+// --- Certificate updated notification ---
+// Sends to every currently responsible person whenever a cert is saved.
+// Gated by notifications_enabled + notify_responsible so admins can disable it.
+
+async function sendCertUpdateNotification(certId, certName, fqdn, expirationDate) {
+  if (getSetting('notifications_enabled', 'false') !== 'true') return;
+  if (getSetting('notify_responsible', 'true') !== 'true') return;
+  const transporter = createTransporter();
+  if (!transporter) return;
+
+  const fromAddress  = getSetting('smtp_from', 'certmanmon@localhost');
+  const appUrl       = getSetting('app_url', '');
+  const expFormatted = new Date(expirationDate + 'T00:00:00').toLocaleDateString('en-GB', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  // Collect all unique responsible persons for this cert
+  const hosts = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(certId);
+  const personHostMap = new Map(); // username → hostname[]
+  for (const h of hosts) {
+    if (!h.responsible_person) continue;
+    const u = h.responsible_person.trim();
+    if (!u) continue;
+    if (!personHostMap.has(u)) personHostMap.set(u, []);
+    personHostMap.get(u).push(h.hostname);
+  }
+  if (personHostMap.size === 0) return;
+
+  for (const [username, hostnames] of personHostMap) {
+    const user = db.prepare('SELECT display_name, email FROM users WHERE username = ? AND active = 1').get(username);
+    if (!user || !user.email) continue;
+
+    const greeting   = user.display_name ? `Hi ${htmlEsc(user.display_name)},` : 'Hi,';
+    const hostBadges = hostnames.map(h =>
+      `<span style="display:inline-block;margin:3px 4px 3px 0;padding:4px 12px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a">${htmlEsc(h)}</span>`
+    ).join('');
+
+    const body = `<p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6">
+      ${greeting}<br><br>A certificate you are responsible for has been updated.
+    </p>
+    <div style="margin-bottom:20px">${hostBadges}</div>
+    ${emailInfoTable([
+      { label: 'Certificate', value: htmlEsc(certName) },
+      { label: 'Domain',      value: htmlEsc(fqdn), mono: true },
+      { label: 'Expires',     value: htmlEsc(expFormatted) },
+    ])}
+    ${appUrl ? emailBtn(appUrl, 'View in CertManMon', '#6366f1') : ''}`;
+
+    const html = emailShell('#6366f1', 'CertManMon · Certificate Monitor', 'Certificate Updated', '', body);
+
+    try {
+      await transporter.sendMail({
+        from: fromAddress,
+        to: user.email,
+        subject: `[CertManMon] Certificate "${certName}" has been updated`,
+        html
+      });
+      console.log(`[notify] Update email sent to ${user.email} for cert "${certName}"`);
+    } catch (err) {
+      console.error(`[notify] Update email failed for ${user.email}:`, err.message);
+    }
   }
 }
 

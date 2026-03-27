@@ -54,11 +54,35 @@ async function loadUserSuggestions() {
     const res = await fetch('/api/users/suggestions');
     if (!res.ok) return;
     availableUsers = await res.json();
-    const dl = $('userSuggestions');
-    dl.innerHTML = availableUsers.map(u =>
-      `<option value="${esc(u.username)}">${esc(u.email)}</option>`
-    ).join('');
+    rebuildUserDatalist();
   } catch (_) {}
+}
+
+function rebuildUserDatalist() {
+  const dl = $('userSuggestions');
+  dl.innerHTML = availableUsers.map(u => {
+    const display = u.display_name || u.username;
+    const sub = u.display_name ? u.username : u.email;
+    return `<option value="${esc(display)}">${esc(sub)}</option>`;
+  }).join('');
+}
+
+// Given a value typed into the person input (display_name or username), return the stored username.
+function resolveUsername(input) {
+  if (!input) return '';
+  const lower = input.toLowerCase();
+  const match = availableUsers.find(u =>
+    u.username.toLowerCase() === lower ||
+    (u.display_name && u.display_name.toLowerCase() === lower)
+  );
+  return match ? match.username : input;
+}
+
+// Given a stored username, return the display_name (falls back to username).
+function resolveDisplayName(username) {
+  if (!username) return '';
+  const match = availableUsers.find(u => u.username === username);
+  return (match && match.display_name) ? match.display_name : username;
 }
 
 // --- URL monitoring ---
@@ -239,9 +263,10 @@ function renderTable() {
 
   $('certBody').innerHTML = filtered.map(c => {
     const days = getDaysLeft(c.expiration_date);
-    const hosts = (c.hosts || []).map(h =>
-      `<span class="host-tag">${esc(h.hostname)}${h.responsible_person ? `<span class="host-tag-person">${esc(h.responsible_person)}</span>` : ''}</span>`
-    ).join('');
+    const hosts = (c.hosts || []).map(h => {
+      const person = h.responsible_person ? resolveDisplayName(h.responsible_person) : '';
+      return `<span class="host-tag">${esc(h.hostname)}${person ? `<span class="host-tag-person">${esc(person)}</span>` : ''}</span>`;
+    }).join('');
     const groupBadges = (c.groups || []).map(g =>
       `<span class="group-badge">${esc(g.name)}</span>`
     ).join(' ');
@@ -343,12 +368,13 @@ function closeModal() {
 }
 
 function addHostRow(hostname = '', responsible_person = '') {
+  const displayValue = resolveDisplayName(responsible_person);
   const row = document.createElement('div');
   row.className = 'host-row';
   row.innerHTML = `
     <input type="text" class="host-input" placeholder="e.g. server01.example.com" value="${esc(hostname)}" />
     <div style="flex:1;min-width:0">
-      <input type="text" class="person-input" placeholder="Responsible person" value="${esc(responsible_person)}" list="userSuggestions" autocomplete="off" style="width:100%" />
+      <input type="text" class="person-input" placeholder="Responsible person" value="${esc(displayValue)}" list="userSuggestions" autocomplete="off" style="width:100%" />
       <div class="person-not-found" style="display:none;font-size:12px;color:var(--warning,#f59e0b);margin-top:3px"></div>
     </div>
     <button type="button" class="remove-host" title="Remove">&#215;</button>
@@ -382,7 +408,7 @@ function addHostRow(hostname = '', responsible_person = '') {
 function getHostValues() {
   return Array.from($('hostList').querySelectorAll('.host-row')).map(row => ({
     hostname: row.querySelector('.host-input').value.trim(),
-    responsible_person: row.querySelector('.person-input').value.trim()
+    responsible_person: resolveUsername(row.querySelector('.person-input').value.trim())
   })).filter(h => h.hostname);
 }
 
@@ -768,13 +794,10 @@ $('quickUserForm').addEventListener('submit', async e => {
 
   // Add to local suggestions and datalist
   availableUsers.push({ username: data.username, display_name: data.display_name, email: data.email });
-  const dl = $('userSuggestions');
-  dl.innerHTML = availableUsers.map(u =>
-    `<option value="${esc(u.username)}">${esc(u.email)}</option>`
-  ).join('');
+  rebuildUserDatalist();
 
-  // Fill the triggering input and hide the hint
-  if (quickUserTargetInput) quickUserTargetInput.value = data.username;
+  // Fill the triggering input with the display name and hide the hint
+  if (quickUserTargetInput) quickUserTargetInput.value = data.display_name || data.username;
   if (quickUserTargetHint) quickUserTargetHint.style.display = 'none';
 
   closeQuickUserModal();

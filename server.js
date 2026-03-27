@@ -993,6 +993,15 @@ app.post('/api/v1/certificates', requireApiKey('readwrite'), (req, res) => {
   const hostRows = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(certId);
   res.status(201).json({ ...cert, hosts: hostRows });
   db.prepare("INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)").run(`apikey:${req.apiKey.name}`, 'cert.create', cert.name, `fqdn:${cert.fqdn}`, req.socket?.remoteAddress || '');
+
+  const v1CreatePersons = new Map();
+  for (const h of hosts) {
+    if (!h.hostname?.trim() || !h.responsible_person?.trim()) continue;
+    const u = h.responsible_person.trim();
+    if (!v1CreatePersons.has(u)) v1CreatePersons.set(u, []);
+    v1CreatePersons.get(u).push(h.hostname.trim());
+  }
+  sendCertAssignmentEmails(name, fqdn, expiration_date, v1CreatePersons).catch(() => {});
 });
 
 app.put('/api/v1/certificates/:id', requireApiKey('readwrite'), async (req, res) => {
@@ -1001,6 +1010,16 @@ app.put('/api/v1/certificates/:id', requireApiKey('readwrite'), async (req, res)
   const existing = db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
   const oldExpiry = existing.expiration_date;
+
+  // Capture before the transaction deletes the old hosts
+  const v1OldResponsible = new Map();
+  db.prepare('SELECT responsible_person, hostname FROM hosts WHERE certificate_id = ?')
+    .all(id)
+    .forEach(r => {
+      if (!r.responsible_person) return;
+      if (!v1OldResponsible.has(r.responsible_person)) v1OldResponsible.set(r.responsible_person, new Set());
+      v1OldResponsible.get(r.responsible_person).add(r.hostname);
+    });
 
   const update = db.prepare('UPDATE certificates SET name = ?, fqdn = ?, expiration_date = ?, password = ?, note = ? WHERE id = ?');
   const deleteHosts = db.prepare('DELETE FROM hosts WHERE certificate_id = ?');
@@ -1020,6 +1039,18 @@ app.put('/api/v1/certificates/:id', requireApiKey('readwrite'), async (req, res)
   const hostRows = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(id);
   res.json({ ...updated, hosts: hostRows });
   db.prepare("INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)").run(`apikey:${req.apiKey.name}`, 'cert.update', updated.name, `fqdn:${updated.fqdn}`, req.socket?.remoteAddress || '');
+
+  const v1AssignedPersons = new Map();
+  for (const h of hosts) {
+    if (!h.hostname?.trim() || !h.responsible_person?.trim()) continue;
+    const u = h.responsible_person.trim(), hn = h.hostname.trim();
+    const oldHosts = v1OldResponsible.get(u);
+    if (oldHosts && oldHosts.has(hn)) continue;
+    if (!v1AssignedPersons.has(u)) v1AssignedPersons.set(u, []);
+    v1AssignedPersons.get(u).push(hn);
+  }
+  sendCertAssignmentEmails(name, fqdn, expiration_date, v1AssignedPersons).catch(() => {});
+
   if (expiration_date && expiration_date > oldExpiry) {
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(() => {});
     runUrlChecksForCert(id).catch(() => {});
@@ -1437,11 +1468,17 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   if (!cert) return res.status(404).json({ error: 'Not found' });
   const oldExpiry = cert.expiration_date;
 
-  // Capture existing responsible persons before the update so we can diff afterwards
-  const oldResponsible = new Set(
-    db.prepare('SELECT DISTINCT responsible_person FROM hosts WHERE certificate_id = ?')
-      .all(id).map(r => r.responsible_person).filter(Boolean)
-  );
+  // Capture existing (username → Set<hostname>) before the update so we can diff at host level.
+  // Tracking at the hostname level means we notify when a person is moved to a NEW hostname,
+  // even if they were already responsible for a different hostname on the same cert.
+  const oldResponsible = new Map(); // username → Set<hostname>
+  db.prepare('SELECT responsible_person, hostname FROM hosts WHERE certificate_id = ?')
+    .all(id)
+    .forEach(r => {
+      if (!r.responsible_person) return;
+      if (!oldResponsible.has(r.responsible_person)) oldResponsible.set(r.responsible_person, new Set());
+      oldResponsible.get(r.responsible_person).add(r.hostname);
+    });
 
   // Only update cert_data if a new one was provided
   const newCertData = cert_data !== undefined ? cert_data : cert.cert_data;
@@ -1471,14 +1508,17 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   res.json({ ...updated, has_cert: !!newCertData, hosts: hostRows, groups: groupRows });
   logEvent(req, 'cert.update', updated.name, `fqdn:${updated.fqdn}`);
 
-  // Notify responsible persons who are newly assigned (not present in old host list)
+  // Notify responsible persons for any (username, hostname) pair that is new.
+  // A person moved to a different hostname still gets notified for that hostname.
   const assignedPersons = new Map();
   for (const h of hosts) {
     if (!h.hostname?.trim() || !h.responsible_person?.trim()) continue;
-    const u = h.responsible_person.trim();
-    if (oldResponsible.has(u)) continue; // already was responsible — no notification needed
+    const u  = h.responsible_person.trim();
+    const hn = h.hostname.trim();
+    const oldHosts = oldResponsible.get(u);
+    if (oldHosts && oldHosts.has(hn)) continue; // same person, same hostname — already notified
     if (!assignedPersons.has(u)) assignedPersons.set(u, []);
-    assignedPersons.get(u).push(h.hostname.trim());
+    assignedPersons.get(u).push(hn);
   }
   sendCertAssignmentEmails(name, fqdn, expiration_date, assignedPersons).catch(err =>
     console.error('[notify] Assignment notification error:', err.message)

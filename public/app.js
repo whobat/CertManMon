@@ -6,6 +6,7 @@ let currentFile = null;    // tracks the last selected file for PFX re-parse
 let availableGroups = [];
 let availableUsers = [];
 let currentCertId = null;  // cert being edited (for URL management)
+let pendingUrls   = [];    // URLs queued in add mode (saved after cert is created)
 
 window.userRole = null;
 
@@ -28,6 +29,7 @@ async function initAuth() {
   const data = await res.json();
   $('headerUser').textContent = data.display_name || data.username;
   window.userRole = data.role;
+  window.userRestricted = !!data.restricted;
 
   // Show settings link for admins
   if (data.role === 'admin') {
@@ -59,6 +61,30 @@ async function loadUserSuggestions() {
 }
 
 // --- URL monitoring ---
+
+function renderPendingUrls() {
+  const container = $('certUrlList');
+  if (!pendingUrls.length) {
+    container.innerHTML = '<div class="url-empty">No URLs added — they will be checked after saving</div>';
+    return;
+  }
+  container.innerHTML = pendingUrls.map((url, i) => `
+    <div class="url-item">
+      <span class="url-status-badge url-status-pending">Pending</span>
+      <div class="url-item-info">
+        <span class="url-text">${esc(url)}</span>
+        <span class="url-meta">Will be checked when the certificate is saved</span>
+      </div>
+      <div class="url-item-actions">
+        <button class="btn btn-icon danger" onclick="removePendingUrl(${i})" title="Remove URL">&#215;</button>
+      </div>
+    </div>`).join('');
+}
+
+window.removePendingUrl = function(index) {
+  pendingUrls.splice(index, 1);
+  renderPendingUrls();
+};
 
 async function loadCertUrls(certId) {
   currentCertId = certId;
@@ -221,10 +247,12 @@ function renderTable() {
     const expFormatted = new Date(c.expiration_date + 'T00:00:00').toLocaleDateString(undefined, {
       year: 'numeric', month: 'short', day: 'numeric'
     });
-    const dlBtn = c.has_cert
-      ? `<a class="btn btn-icon" href="/api/certificates/${c.id}/download" download title="Download certificate">&#8659;</a>`
-      : `<button class="btn btn-icon" disabled title="No certificate file stored" style="opacity:0.35;cursor:default">&#8659;</button>`;
-    const pwCell = c.password
+    const dlBtn = !c.has_cert
+      ? `<button class="btn btn-icon" disabled title="No certificate file stored" style="opacity:0.35;cursor:default">&#8659;</button>`
+      : window.userRestricted
+        ? `<button class="btn btn-icon" disabled title="Download not permitted for your account" style="opacity:0.35;cursor:default">&#8659;</button>`
+        : `<a class="btn btn-icon" href="/api/certificates/${c.id}/download" download title="Download certificate">&#8659;</a>`;
+    const pwCell = (c.password && !window.userRestricted)
       ? `<div class="pw-cell">
            <span class="pw-mask" data-pw="${esc(c.password)}">••••••••</span>
            <button class="btn-show-password pw-toggle" title="Show/hide password">
@@ -307,6 +335,7 @@ function closeModal() {
   currentFile = null;
   editMode = false;
   currentCertId = null;
+  pendingUrls = [];
   $('urlMonitorSection').style.display = 'none';
   $('certUrlList').innerHTML = '';
   $('certUrlInput').value = '';
@@ -369,7 +398,12 @@ window.openDelete = function(id, name) {
 };
 
 // --- Events ---
-$('addBtn').addEventListener('click', () => openModal('Add Certificate'));
+$('addBtn').addEventListener('click', () => {
+  pendingUrls = [];
+  openModal('Add Certificate');
+  $('urlMonitorSection').style.display = '';
+  renderPendingUrls();
+});
 $('modalClose').addEventListener('click', closeModal);
 $('cancelBtn').addEventListener('click', closeModal);
 $('addHostBtn').addEventListener('click', () => addHostRow());
@@ -377,26 +411,36 @@ $('addHostBtn').addEventListener('click', () => addHostRow());
 $('addCertUrlBtn').addEventListener('click', async () => {
   const input = $('certUrlInput');
   const url = input.value.trim();
-  if (!url || !currentCertId) return;
-  const btn = $('addCertUrlBtn');
-  btn.disabled = true;
-  btn.textContent = 'Checking…';
-  try {
-    const res = await fetch(`/api/certificates/${currentCertId}/urls`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    });
-    if (res.ok) {
-      input.value = '';
-      await loadCertUrls(currentCertId);
-    } else {
-      const data = await res.json();
-      alert(data.error || 'Failed to add URL');
+  if (!url) return;
+
+  if (currentCertId) {
+    // Edit mode — save and check immediately
+    const btn = $('addCertUrlBtn');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    try {
+      const res = await fetch(`/api/certificates/${currentCertId}/urls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      if (res.ok) {
+        input.value = '';
+        await loadCertUrls(currentCertId);
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to add URL');
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '+ Add URL';
     }
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '+ Add URL';
+  } else {
+    // Add mode — queue for after save
+    if (pendingUrls.includes(url)) { alert('This URL is already in the list'); return; }
+    pendingUrls.push(url);
+    input.value = '';
+    renderPendingUrls();
   }
 });
 
@@ -422,7 +466,16 @@ $('certForm').addEventListener('submit', async e => {
   if (editMode && id) {
     await api('PUT', `/certificates/${id}`, payload);
   } else {
-    await api('POST', '/certificates', payload);
+    const created = await api('POST', '/certificates', payload);
+    if (created && created.id && pendingUrls.length) {
+      await Promise.all(pendingUrls.map(url =>
+        fetch(`/api/certificates/${created.id}/urls`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        }).catch(() => {})
+      ));
+    }
   }
   closeModal();
   await loadCerts();

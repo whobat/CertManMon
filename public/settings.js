@@ -65,6 +65,21 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+window.toggleUserActive = async function(id, currentActive) {
+  const newActive = currentActive ? 0 : 1;
+  const res = await fetch(`/api/users/${id}/active`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active: !!newActive })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    showUsersError(data.error || 'Failed to update user');
+    return;
+  }
+  loadUsers();
+};
+
 // --- Load users ---
 async function loadUsers() {
   const res = await fetch('/api/users');
@@ -75,11 +90,18 @@ async function loadUsers() {
   const users = await res.json();
 
   if (users.length === 0) {
-    $('usersBody').innerHTML = '<tr><td colspan="6" class="empty">No users found</td></tr>';
+    $('usersBody').innerHTML = '<tr><td colspan="7" class="empty">No users found</td></tr>';
     return;
   }
 
-  $('usersBody').innerHTML = users.map(u => `
+  $('usersBody').innerHTML = users.map(u => {
+    const lastLogin = u.last_login_at
+      ? new Date(u.last_login_at + 'Z').toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : '<span style="color:var(--text-muted)">Never</span>';
+    const toggleBtn = `<button class="btn btn-icon ${u.active ? 'danger' : 'btn-secondary'}"
+      onclick="toggleUserActive(${u.id}, ${u.active ? 1 : 0})"
+      title="${u.active ? 'Disable user' : 'Enable user'}">${u.active ? 'Disable' : 'Enable'}</button>`;
+    return `
     <tr data-id="${u.id}">
       <td>
         <strong>${esc(u.username)}</strong>
@@ -89,14 +111,16 @@ async function loadUsers() {
       <td>${roleBadge(u.role)}</td>
       <td>${providerBadge(u.auth_provider)}</td>
       <td>${activeBadge(u.active)}</td>
+      <td>${lastLogin}</td>
       <td>
         <div class="action-btns">
+          ${toggleBtn}
           <button class="btn btn-icon" onclick="openEditUser(${u.id})" title="Edit">&#9998;</button>
           <button class="btn btn-icon danger" onclick="openDeleteUser(${u.id}, '${esc(u.username)}')" title="Delete">&#128465;</button>
         </div>
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
 function showUsersError(msg) {
@@ -394,15 +418,18 @@ async function loadGroups() {
 
   $('groupsBody').innerHTML = groups.map(g => `
     <tr data-id="${g.id}">
-      <td><strong>${esc(g.name)}</strong></td>
+      <td>
+        <strong>${esc(g.name)}</strong>
+        ${g.restricted ? '<span class="badge-restricted">System</span>' : ''}
+      </td>
       <td>${esc(g.description || '')}</td>
       <td>${g.user_count}</td>
       <td>${g.cert_count}</td>
       <td>
         <div class="action-btns">
           <button class="btn btn-secondary btn-icon" onclick="openGroupPanel(${g.id})" title="Manage members">Manage</button>
-          <button class="btn btn-icon" onclick="openEditGroup(${g.id}, '${esc(g.name)}', '${esc(g.description || '')}')" title="Edit">&#9998;</button>
-          <button class="btn btn-icon danger" onclick="openDeleteGroup(${g.id}, '${esc(g.name)}')" title="Delete">&#128465;</button>
+          ${!g.restricted ? `<button class="btn btn-icon" onclick="openEditGroup(${g.id}, '${esc(g.name)}', '${esc(g.description || '')}')" title="Edit">&#9998;</button>` : ''}
+          ${!g.restricted ? `<button class="btn btn-icon danger" onclick="openDeleteGroup(${g.id}, '${esc(g.name)}')" title="Delete">&#128465;</button>` : ''}
         </div>
       </td>
     </tr>
@@ -980,4 +1007,9 @@ $('clearLogsBtn').addEventListener('click', async () => {
 (async () => {
   await initAuth();
   await Promise.all([loadUsers(), loadGroups(), loadEntraSettings(), loadNotificationSettings()]);
+  try {
+    const v = await fetch('/api/version').then(r => r.json());
+    const el = document.getElementById('versionBadge');
+    if (el && v.version) el.textContent = 'v' + v.version;
+  } catch (_) {}
 })();

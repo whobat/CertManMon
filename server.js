@@ -52,6 +52,7 @@ db.exec(`
     auth_provider TEXT NOT NULL DEFAULT 'local',
     entra_oid TEXT,
     active INTEGER NOT NULL DEFAULT 1,
+    last_login_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -64,6 +65,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL DEFAULT '',
+    restricted INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
   );
 
@@ -135,7 +137,9 @@ try { db.exec(`ALTER TABLE certificates ADD COLUMN cert_data TEXT`); } catch (_)
 try { db.exec(`ALTER TABLE certificates ADD COLUMN password TEXT NOT NULL DEFAULT ''`); } catch (_) {}
 try { db.exec(`ALTER TABLE certificates ADD COLUMN note TEXT NOT NULL DEFAULT ''`); } catch (_) {}
 try { db.exec(`ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`); } catch (_) {}
-try { db.exec(`CREATE TABLE IF NOT EXISTS cert_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN last_login_at TEXT`); } catch (_) {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS cert_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '', restricted INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
+try { db.exec(`ALTER TABLE cert_groups ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS cert_group_members (group_id INTEGER NOT NULL, certificate_id INTEGER NOT NULL, PRIMARY KEY (group_id, certificate_id), FOREIGN KEY (group_id) REFERENCES cert_groups(id) ON DELETE CASCADE, FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS user_group_members (group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (group_id, user_id), FOREIGN KEY (group_id) REFERENCES cert_groups(id) ON DELETE CASCADE, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS notification_log (id INTEGER PRIMARY KEY AUTOINCREMENT, certificate_id INTEGER NOT NULL, expiration_date TEXT NOT NULL, threshold_days INTEGER NOT NULL, recipient TEXT NOT NULL, sent_at TEXT DEFAULT (datetime('now')), UNIQUE (certificate_id, expiration_date, threshold_days, recipient))`); } catch (_) {}
@@ -180,6 +184,29 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS cert_urls (id INTEGER PRIMARY KEY AUTO
     console.log(`Seeded admin user "${AUTH_USERNAME}" from environment variables`);
   }
 })();
+
+// Ensure default_viewers group always exists
+db.prepare(
+  `INSERT OR IGNORE INTO cert_groups (name, description, restricted) VALUES ('default_viewers', 'System group — members can view all certificates but cannot download files or retrieve passwords', 1)`
+).run();
+
+// Helper: returns true if the user should have restricted view-only access
+function isRestrictedViewer(userId, userRole) {
+  if (userRole === 'admin' || userRole === 'editor') return false;
+  return !!db.prepare(`
+    SELECT 1 FROM user_group_members ugm
+    JOIN cert_groups cg ON cg.id = ugm.group_id
+    WHERE ugm.user_id = ? AND cg.restricted = 1 LIMIT 1
+  `).get(userId);
+}
+
+// Helper: add a user to default_viewers (safe, silently ignores duplicates)
+function addToDefaultViewers(userId) {
+  const grp = db.prepare("SELECT id FROM cert_groups WHERE name = 'default_viewers'").get();
+  if (grp) {
+    try { db.prepare('INSERT OR IGNORE INTO user_group_members (group_id, user_id) VALUES (?, ?)').run(grp.id, userId); } catch (_) {}
+  }
+}
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
@@ -228,6 +255,11 @@ app.get('/login', (req, res) => {
 
 app.get('/style.css', (req, res) => res.sendFile(path.join(__dirname, 'public/style.css')));
 
+// Version
+app.get('/api/version', (req, res) => {
+  res.json({ version: require('./package.json').version });
+});
+
 // Returns enabled auth providers
 app.get('/api/auth/providers', (req, res) => {
   const entraEnabled = db.prepare("SELECT value FROM settings WHERE key = 'entra_enabled'").get();
@@ -255,6 +287,7 @@ app.post('/api/auth/login', async (req, res) => {
   req.session.userId = user.id;
   req.session.username = user.username;
   req.session.userRole = user.role;
+  db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
   res.json({ ok: true });
   logEvent(req, 'auth.login', user.username, `role:${user.role}`);
 });
@@ -369,6 +402,7 @@ app.get('/api/auth/entra/callback', async (req, res) => {
       const insertedId = db.prepare(
         'INSERT INTO users (username, email, password_hash, role, auth_provider, entra_oid, active) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(username, email, null, 'viewer', 'entra', oid, 1).lastInsertRowid;
+      addToDefaultViewers(insertedId);
       user = db.prepare('SELECT * FROM users WHERE id = ?').get(insertedId);
     } else {
       // Update OID if needed
@@ -384,6 +418,7 @@ app.get('/api/auth/entra/callback', async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.userRole = user.role;
+    db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
     res.redirect('/');
     logEvent(req, 'auth.entra_login', user.username, `role:${user.role}`);
   } catch (e) {
@@ -396,13 +431,13 @@ app.get('/api/auth/entra/callback', async (req, res) => {
 app.get('/api/auth/me', requireAuth, (req, res) => {
   const user = db.prepare('SELECT id, username, display_name, email, role FROM users WHERE id = ?').get(req.session.userId);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  res.json(user);
+  res.json({ ...user, restricted: isRestrictedViewer(req.session.userId, req.session.userRole) });
 });
 
 // --- User management routes (admin only) ---
 
 app.get('/api/users', ...requireRole('admin'), (req, res) => {
-  const users = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, created_at FROM users ORDER BY created_at ASC').all();
+  const users = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, last_login_at, created_at FROM users ORDER BY created_at ASC').all();
   res.json(users);
 });
 
@@ -423,7 +458,8 @@ app.post('/api/users', ...requireRole('admin'), async (req, res) => {
     const info = db.prepare(
       'INSERT INTO users (username, display_name, email, password_hash, role, auth_provider, active) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(username, display_name, email, password_hash, role, auth_provider, active ? 1 : 0);
-    const user = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, created_at FROM users WHERE id = ?').get(info.lastInsertRowid);
+    const user = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, last_login_at, created_at FROM users WHERE id = ?').get(info.lastInsertRowid);
+    if (user.role !== 'admin') addToDefaultViewers(user.id);
     res.status(201).json(user);
     logEvent(req, 'user.create', user.username, `role:${user.role}`);
     sendWelcomeEmail(user.username, user.display_name || '', user.email, password || null, user.role, getSetting('app_url')).catch(err =>
@@ -475,7 +511,7 @@ app.put('/api/users/:id', ...requireRole('admin'), async (req, res) => {
       'UPDATE users SET username = ?, display_name = ?, email = ?, password_hash = ?, role = ?, active = ? WHERE id = ?'
     ).run(newUsername, newDisplayName, newEmail, newHash, newRole, newActive, id);
 
-    const updated = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, created_at FROM users WHERE id = ?').get(id);
+    const updated = db.prepare('SELECT id, username, display_name, email, role, auth_provider, active, last_login_at, created_at FROM users WHERE id = ?').get(id);
     res.json(updated);
     logEvent(req, 'user.update', updated.username, `role:${updated.role},active:${updated.active}`);
   } catch (e) {
@@ -484,6 +520,30 @@ app.put('/api/users/:id', ...requireRole('admin'), async (req, res) => {
     }
     throw e;
   }
+});
+
+// PATCH /api/users/:id/active — quick enable/disable toggle (admin only)
+app.patch('/api/users/:id/active', ...requireRole('admin'), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { active } = req.body;
+  if (active === undefined) return res.status(400).json({ error: 'active is required' });
+
+  if (id === req.session.userId) {
+    return res.status(400).json({ error: 'You cannot disable your own account' });
+  }
+
+  const user = db.prepare('SELECT id, username, role, active FROM users WHERE id = ?').get(id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  if (!active && user.role === 'admin') {
+    const adminCount = db.prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1").get().c;
+    if (adminCount <= 1) return res.status(400).json({ error: 'Cannot disable the last active admin' });
+  }
+
+  const newActive = active ? 1 : 0;
+  db.prepare('UPDATE users SET active = ? WHERE id = ?').run(newActive, id);
+  logEvent(req, 'user.update', user.username, `active:${newActive}`);
+  res.json({ ok: true, active: newActive });
 });
 
 // GET /api/users/suggestions — username + email for autocomplete (any authenticated user)
@@ -588,7 +648,7 @@ app.put('/api/users/:id/groups', ...requireRole('admin'), (req, res) => {
 // GET /api/groups — list all groups with counts
 app.get('/api/groups', requireAuth, (req, res) => {
   const groups = db.prepare(`
-    SELECT g.id, g.name, g.description, g.created_at,
+    SELECT g.id, g.name, g.description, g.restricted, g.created_at,
       (SELECT COUNT(*) FROM user_group_members WHERE group_id = g.id) AS user_count,
       (SELECT COUNT(*) FROM cert_group_members WHERE group_id = g.id) AS cert_count
     FROM cert_groups g ORDER BY g.name ASC
@@ -623,10 +683,15 @@ app.put('/api/groups/:id', ...requireRole('admin'), (req, res) => {
   const newName = name !== undefined ? name.trim() : existing.name;
   const newDesc = description !== undefined ? description : existing.description;
 
+  // Protect the system group name
+  if (existing.restricted && name !== undefined && name.trim() !== existing.name) {
+    return res.status(400).json({ error: 'The name of a restricted system group cannot be changed' });
+  }
+
   try {
     db.prepare('UPDATE cert_groups SET name = ?, description = ? WHERE id = ?').run(newName, newDesc, id);
     const updated = db.prepare(`
-      SELECT g.id, g.name, g.description, g.created_at,
+      SELECT g.id, g.name, g.description, g.restricted, g.created_at,
         (SELECT COUNT(*) FROM user_group_members WHERE group_id = g.id) AS user_count,
         (SELECT COUNT(*) FROM cert_group_members WHERE group_id = g.id) AS cert_count
       FROM cert_groups g WHERE g.id = ?
@@ -646,6 +711,7 @@ app.delete('/api/groups/:id', ...requireRole('admin'), (req, res) => {
   const id = parseInt(req.params.id, 10);
   const existing = db.prepare('SELECT * FROM cert_groups WHERE id = ?').get(id);
   if (!existing) return res.status(404).json({ error: 'Group not found' });
+  if (existing.restricted) return res.status(400).json({ error: 'System groups cannot be deleted' });
   db.prepare('DELETE FROM cert_groups WHERE id = ?').run(id);
   logEvent(req, 'group.delete', existing.name);
   res.status(204).end();
@@ -918,6 +984,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- Certificates ---
 
 app.get('/api/certificates', requireAuth, (req, res) => {
+  const restricted = isRestrictedViewer(req.session.userId, req.session.userRole);
+  const isAdmin = req.session.userRole === 'admin';
+
+  // Restricted viewers see all certs; normal non-admins see only their groups
   const certs = db.prepare(`
     SELECT c.id, c.name, c.fqdn, c.expiration_date, c.password, c.note, c.created_at,
            CASE WHEN c.cert_data IS NOT NULL AND c.cert_data != '' THEN 1 ELSE 0 END AS has_cert,
@@ -932,16 +1002,18 @@ app.get('/api/certificates', requireAuth, (req, res) => {
     FROM certificates c
     WHERE
       ? = 'admin'
+      OR ? = 1
       OR EXISTS (
         SELECT 1 FROM cert_group_members x
         JOIN user_group_members ugm ON ugm.group_id = x.group_id
         WHERE x.certificate_id = c.id AND ugm.user_id = ?
       )
     ORDER BY c.expiration_date ASC
-  `).all(req.session.userRole, req.session.userId);
+  `).all(req.session.userRole, restricted ? 1 : 0, req.session.userId);
 
   const result = certs.map(c => ({
     ...c,
+    password: (isAdmin || !restricted) ? c.password : '',
     hosts: c.hosts_raw
       ? c.hosts_raw.split('||').map(s => { const [hostname, responsible_person] = s.split('\x1f'); return { hostname, responsible_person: responsible_person || '' }; })
       : [],
@@ -1026,6 +1098,9 @@ app.post('/api/certificates/parse', requireAuth, upload.single('cert'), (req, re
 
 // Download stored certificate file
 app.get('/api/certificates/:id/download', requireAuth, (req, res) => {
+  if (isRestrictedViewer(req.session.userId, req.session.userRole)) {
+    return res.status(403).json({ error: 'Download not permitted for your account' });
+  }
   const cert = db.prepare('SELECT name, cert_data FROM certificates WHERE id = ?').get(req.params.id);
   if (!cert) return res.status(404).json({ error: 'Not found' });
   if (!cert.cert_data) return res.status(404).json({ error: 'No certificate file stored' });

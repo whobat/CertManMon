@@ -1647,38 +1647,22 @@ async function sendCertAssignmentEmails(certName, fqdn, expirationDate, assignme
     if (!user || !user.email) continue;
 
     const greeting = user.display_name ? `Hi ${htmlEsc(user.display_name)},` : 'Hi,';
-    const hostnameItems = hostnames.map(h => `<li style="padding:2px 0;font-family:monospace">${htmlEsc(h)}</li>`).join('');
-    const certLinkHtml = appUrl
-      ? `<a href="${htmlEsc(appUrl)}" style="color:#818cf8;text-decoration:none">${htmlEsc(certName)}</a>`
-      : `<strong>${htmlEsc(certName)}</strong>`;
-    const viewBtn = appUrl
-      ? `<a href="${htmlEsc(appUrl)}" style="display:inline-block;margin-top:20px;padding:10px 20px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600">View in CertManMon &rarr;</a>`
-      : '';
+    const hostBadges = hostnames.map(h =>
+      `<span style="display:inline-block;margin:3px 4px 3px 0;padding:4px 12px;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:5px;font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a">${htmlEsc(h)}</span>`
+    ).join('');
 
-    const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family:sans-serif;background:#1a1f2e;color:#e2e8f0;padding:24px">
-  <div style="max-width:520px;margin:0 auto;background:#252c3b;border-radius:8px;overflow:hidden">
-    <div style="background:#6366f1;padding:16px 24px">
-      <h2 style="margin:0;color:#fff;font-size:18px">Certificate Assignment</h2>
-    </div>
-    <div style="padding:24px">
-      <p style="margin:0 0 16px">${greeting}<br><br>
-      You have been assigned as responsible for the following host(s) on certificate ${certLinkHtml}:</p>
-      <ul style="margin:0 0 16px;padding-left:20px">${hostnameItems}</ul>
-      <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0;font-family:monospace">${htmlEsc(fqdn)}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">Expires</td><td style="padding:6px 0">${htmlEsc(expFormatted)}</td></tr>
-      </table>
-      ${viewBtn}
-      <p style="margin:20px 0 0;font-size:12px;color:#64748b">If you did not expect this email, please contact your administrator.</p>
-    </div>
-  </div>
-</body>
-</html>`;
+    const assignBody = `<p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6">
+      ${greeting}<br><br>You have been assigned as the responsible contact for the following host${hostnames.length > 1 ? 's' : ''} on certificate <strong>${htmlEsc(certName)}</strong>:
+    </p>
+    <div style="margin-bottom:20px">${hostBadges}</div>
+    ${emailInfoTable([
+      { label: 'Certificate', value: htmlEsc(certName) },
+      { label: 'Domain',      value: htmlEsc(fqdn), mono: true },
+      { label: 'Expires',     value: htmlEsc(expFormatted) },
+    ])}
+    ${appUrl ? emailBtn(appUrl, 'View in CertManMon', '#6366f1') : ''}`;
+
+    const html = emailShell('#6366f1', 'CertManMon · Certificate Monitor', 'Certificate Responsibility', '', assignBody);
 
     try {
       await transporter.sendMail({
@@ -1703,38 +1687,27 @@ async function sendWelcomeEmail(username, display_name, email, password, role, a
   const fromAddress = getSetting('smtp_from', 'certmanmon@localhost');
   const roleLabels = { admin: 'Admin', editor: 'Editor', viewer: 'Viewer' };
   const loginUrl = appUrl || '';
-  const loginBtn = loginUrl
-    ? `<a href="${loginUrl}/login" style="display:inline-block;margin-top:20px;padding:10px 20px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600">Sign in to CertManMon &rarr;</a>`
-    : '';
 
-  const credentialsRow = password
-    ? `<tr><td style="padding:6px 0;color:#94a3b8;width:140px">Password</td><td style="padding:6px 0;font-family:monospace;background:#1a1f2e;padding:4px 8px;border-radius:4px">${htmlEsc(password)}</td></tr>`
-    : `<tr><td style="padding:6px 0;color:#94a3b8;width:140px">Password</td><td style="padding:6px 0;color:#94a3b8">Set by your administrator</td></tr>`;
+  const pwRow = password
+    ? { label: 'Password', value: `<span style="font-family:'Courier New',Courier,monospace;background:#f1f5f9;padding:3px 8px;border-radius:4px;border:1px solid #e2e8f0;font-size:13px">${htmlEsc(password)}</span>`, mono: false }
+    : { label: 'Password', value: '<span style="color:#64748b;font-style:italic">Set by your administrator</span>' };
 
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family:sans-serif;background:#1a1f2e;color:#e2e8f0;padding:24px">
-  <div style="max-width:520px;margin:0 auto;background:#252c3b;border-radius:8px;overflow:hidden">
-    <div style="background:#6366f1;padding:16px 24px">
-      <h2 style="margin:0;color:#fff;font-size:18px">Welcome to CertManMon</h2>
-    </div>
-    <div style="padding:24px">
-      <p style="margin:0 0 16px">${display_name ? `Hi ${htmlEsc(display_name)},<br><br>` : ''}Your account has been created. Here are your login credentials:</p>
-      <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Username</td><td style="padding:6px 0"><strong>${htmlEsc(username)}</strong></td></tr>
-        ${display_name ? `<tr><td style="padding:6px 0;color:#94a3b8">Name</td><td style="padding:6px 0">${htmlEsc(display_name)}</td></tr>` : ''}
-        <tr><td style="padding:6px 0;color:#94a3b8">Email</td><td style="padding:6px 0">${htmlEsc(email)}</td></tr>
-        ${credentialsRow}
-        <tr><td style="padding:6px 0;color:#94a3b8">Role</td><td style="padding:6px 0">${htmlEsc(roleLabels[role] || role)}</td></tr>
-      </table>
-      ${loginBtn}
-      <p style="margin:20px 0 0;font-size:12px;color:#64748b">If you did not expect this email, please contact your administrator.</p>
-    </div>
-  </div>
-</body>
-</html>`;
+  const welcomeRows = [
+    { label: 'Username', value: `<strong>${htmlEsc(username)}</strong>` },
+    ...(display_name ? [{ label: 'Name', value: htmlEsc(display_name) }] : []),
+    { label: 'Email',    value: htmlEsc(email) },
+    pwRow,
+    { label: 'Role',     value: `<span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:700;background:#ede9fe;color:#5b21b6">${htmlEsc(roleLabels[role] || role)}</span>` },
+  ];
+
+  const greeting = display_name ? `Hi ${htmlEsc(display_name)},` : 'Hi,';
+  const welcomeBody = `<p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6">
+    ${greeting}<br><br>Your CertManMon account has been created. Use the credentials below to sign in${password ? ' — you will be asked to change your password on first login' : ''}.
+  </p>
+  ${emailInfoTable(welcomeRows)}
+  ${loginUrl ? emailBtn(loginUrl + '/login', 'Sign in to CertManMon', '#6366f1') : ''}`;
+
+  const html = emailShell('#6366f1', 'CertManMon · Account Created', 'Welcome to CertManMon', '', welcomeBody);
 
   try {
     await transporter.sendMail({
@@ -1775,33 +1748,32 @@ async function sendRenewalNotification(certId, certName, fqdn, oldExpiry, newExp
     }
   }
 
-  const linkBtn = appUrl
-    ? `<a href="${appUrl}" style="display:inline-block;margin-top:20px;padding:10px 20px;background:#22c55e;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600">View Certificates &rarr;</a>`
-    : '';
+  const oldFmt = new Date(oldExpiry + 'T00:00:00').toLocaleDateString('en-GB', { year:'numeric', month:'long', day:'numeric' });
+  const newFmt = new Date(newExpiry + 'T00:00:00').toLocaleDateString('en-GB', { year:'numeric', month:'long', day:'numeric' });
 
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family:sans-serif;background:#1a1f2e;color:#e2e8f0;padding:24px">
-  <div style="max-width:520px;margin:0 auto;background:#252c3b;border-radius:8px;overflow:hidden">
-    <div style="background:#22c55e;padding:16px 24px">
-      <h2 style="margin:0;color:#fff;font-size:18px">Certificate Renewed</h2>
-    </div>
-    <div style="padding:24px">
-      <p style="margin:0 0 16px">The following certificate has been renewed:</p>
-      <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${htmlEsc(fqdn)}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">Previous Expiry</td><td style="padding:6px 0;color:#f87171">${htmlEsc(oldExpiry)}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">New Expiry</td><td style="padding:6px 0;color:#4ade80"><strong>${htmlEsc(newExpiry)}</strong></td></tr>
-      </table>
-      ${linkBtn}
-      <p style="margin:20px 0 0;font-size:12px;color:#64748b">This notification was sent by CertManMon.</p>
-    </div>
-  </div>
-</body>
-</html>`;
+  const renewalHero = `<p style="margin:0;font-size:15px;color:#374151">Certificate renewed successfully</p>
+    <table cellpadding="0" cellspacing="0" style="margin:16px auto 0"><tr>
+      <td style="text-align:center;padding:0 16px">
+        <p style="margin:0;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.8px;font-weight:600">Previous expiry</p>
+        <p style="margin:6px 0 0;font-size:16px;color:#ef4444;font-weight:700;text-decoration:line-through">${htmlEsc(oldFmt)}</p>
+      </td>
+      <td style="padding:0 10px;font-size:22px;color:#16a34a;font-weight:700">&rarr;</td>
+      <td style="text-align:center;padding:0 16px">
+        <p style="margin:0;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.8px;font-weight:600">New expiry</p>
+        <p style="margin:6px 0 0;font-size:18px;color:#16a34a;font-weight:800">${htmlEsc(newFmt)}</p>
+      </td>
+    </tr></table>`;
+
+  const renewalBody = `<p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6">
+    The following certificate has been renewed and is now valid until <strong style="color:#16a34a">${htmlEsc(newFmt)}</strong>.
+  </p>
+  ${emailInfoTable([
+    { label: 'Certificate', value: htmlEsc(certName) },
+    { label: 'Domain',      value: htmlEsc(fqdn), mono: true },
+  ])}
+  ${appUrl ? emailBtn(appUrl, 'View in CertManMon', '#16a34a') : ''}`;
+
+  const html = emailShell('#16a34a', 'CertManMon · Certificate Monitor', 'Certificate Renewed', renewalHero, renewalBody);
 
   const subject = `[CertManMon] Certificate "${certName}" has been renewed`;
   for (const recipient of recipients) {
@@ -1839,34 +1811,68 @@ function createTransporter() {
   });
 }
 
-function buildEmailHtml(certName, fqdn, expirationDate, daysLeft, thresholdDays, appUrl = '') {
-  const urgency = daysLeft <= 7 ? 'critical' : daysLeft <= 14 ? 'warning' : 'notice';
-  const color = urgency === 'critical' ? '#e74c3c' : urgency === 'warning' ? '#f39c12' : '#3498db';
-  const linkBtn = appUrl
-    ? `<a href="${appUrl}" style="display:inline-block;margin-top:20px;padding:10px 20px;background:${color};color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600">View Certificates &rarr;</a>`
-    : '';
-  return `
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="font-family:sans-serif;background:#1a1f2e;color:#e2e8f0;padding:24px">
-  <div style="max-width:520px;margin:0 auto;background:#252c3b;border-radius:8px;overflow:hidden">
-    <div style="background:${color};padding:16px 24px">
-      <h2 style="margin:0;color:#fff;font-size:18px">Certificate Expiry ${urgency === 'critical' ? 'Alert' : 'Reminder'}</h2>
-    </div>
-    <div style="padding:24px">
-      <p style="margin:0 0 16px">The following certificate will expire in <strong style="color:${color}">${daysLeft} day${daysLeft !== 1 ? 's' : ''}</strong> (threshold: ${thresholdDays} days):</p>
-      <table style="width:100%;border-collapse:collapse;font-size:14px">
-        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate Name</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0">${htmlEsc(fqdn)}</td></tr>
-        <tr><td style="padding:6px 0;color:#94a3b8">Expiration Date</td><td style="padding:6px 0;color:${color}"><strong>${htmlEsc(expirationDate)}</strong></td></tr>
-      </table>
-      ${linkBtn}
-      <p style="margin:20px 0 0;font-size:12px;color:#64748b">This notification was sent by CertManMon.</p>
-    </div>
-  </div>
+function emailBtn(url, label, color) {
+  return `<table cellpadding="0" cellspacing="0" style="margin-top:24px"><tr><td style="background:${color};border-radius:7px"><a href="${htmlEsc(url)}" style="display:inline-block;padding:11px 26px;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;font-family:Arial,Helvetica,sans-serif">${label} &rarr;</a></td></tr></table>`;
+}
+
+function emailInfoTable(rows) {
+  // rows: [{label, value, mono, accent}]
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;font-family:Arial,Helvetica,sans-serif">
+  ${rows.map((r, i) => `<tr>
+    <td style="padding:11px 16px;font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;background:#f8fafc;width:130px${i > 0 ? ';border-top:1px solid #e2e8f0' : ''}">${r.label}</td>
+    <td style="padding:11px 16px;font-size:14px;color:${r.accent || '#0f172a'};font-weight:${r.accent ? '700' : '500'}${r.mono ? ';font-family:\'Courier New\',Courier,monospace' : ''}${i > 0 ? ';border-top:1px solid #e2e8f0' : ''}">${r.value}</td>
+  </tr>`).join('')}
+</table>`;
+}
+
+function emailShell(accentColor, headerLabel, title, heroHtml, bodyHtml) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${title}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 16px">
+  <tr><td align="center">
+    <table cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:10px;border:1px solid #e2e8f0">
+      <tr><td style="background:${accentColor};border-radius:10px 10px 0 0;padding:22px 32px">
+        <p style="margin:0 0 5px;font-size:11px;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:1.2px;font-weight:600">${htmlEsc(headerLabel)}</p>
+        <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;line-height:1.3">${title}</h1>
+      </td></tr>
+      ${heroHtml ? `<tr><td style="background:#f8fafc;padding:24px 32px;text-align:center;border-bottom:1px solid #e2e8f0">${heroHtml}</td></tr>` : ''}
+      <tr><td style="padding:28px 32px">${bodyHtml}</td></tr>
+      <tr><td style="padding:14px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;border-radius:0 0 10px 10px">
+        <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center">Sent by <strong>CertManMon</strong> &middot; If you did not expect this email, contact your administrator</p>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
 </body>
 </html>`;
+}
+
+function buildEmailHtml(certName, fqdn, expirationDate, daysLeft, thresholdDays, appUrl = '') {
+  const urgency = daysLeft <= 7 ? 'critical' : daysLeft <= 14 ? 'warning' : 'notice';
+  const accent  = urgency === 'critical' ? '#dc2626' : urgency === 'warning' ? '#d97706' : '#2563eb';
+  const heroBg  = urgency === 'critical' ? '#fef2f2' : urgency === 'warning' ? '#fffbeb' : '#eff6ff';
+  const heroTxt = urgency === 'critical' ? '#991b1b' : urgency === 'warning' ? '#92400e' : '#1e40af';
+  const title   = urgency === 'critical' ? 'Certificate Expiry Alert' : 'Certificate Expiry Reminder';
+  const expFmt  = new Date(expirationDate + 'T00:00:00').toLocaleDateString('en-GB', { year:'numeric', month:'long', day:'numeric' });
+
+  const hero = `<table width="100%" cellpadding="0" cellspacing="0" style="background:${heroBg};border-radius:8px"><tr><td style="padding:20px;text-align:center">
+    <p style="margin:0;font-size:60px;font-weight:800;color:${heroTxt};line-height:1;letter-spacing:-2px">${daysLeft}</p>
+    <p style="margin:6px 0 0;font-size:13px;color:${accent};font-weight:700;text-transform:uppercase;letter-spacing:1px">day${daysLeft !== 1 ? 's' : ''} until expiry</p>
+  </td></tr></table>`;
+
+  const body = `<p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6">
+    This certificate expires on <strong style="color:${accent}">${htmlEsc(expFmt)}</strong>. Please renew it before it expires to avoid service disruption.
+  </p>
+  ${emailInfoTable([
+    { label: 'Certificate', value: htmlEsc(certName) },
+    { label: 'Domain',      value: htmlEsc(fqdn), mono: true },
+    { label: 'Expires',     value: htmlEsc(expFmt), accent },
+  ])}
+  ${appUrl ? emailBtn(appUrl, 'View in CertManMon', accent) : ''}`;
+
+  return emailShell(accent, 'CertManMon · Certificate Monitor', title, hero, body);
 }
 
 async function runNotificationCheck() {

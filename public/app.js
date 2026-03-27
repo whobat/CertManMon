@@ -5,6 +5,7 @@ let pendingCertData = null; // holds PEM text from uploaded file
 let currentFile = null;    // tracks the last selected file for PFX re-parse
 let availableGroups = [];
 let availableUsers = [];
+let currentCertId = null;  // cert being edited (for URL management)
 
 window.userRole = null;
 
@@ -56,6 +57,50 @@ async function loadUserSuggestions() {
     ).join('');
   } catch (_) {}
 }
+
+// --- URL monitoring ---
+
+async function loadCertUrls(certId) {
+  currentCertId = certId;
+  const urls = await api('GET', `/certificates/${certId}/urls`);
+  renderUrlList(urls || [], certId);
+}
+
+function renderUrlList(urls, certId) {
+  const container = $('certUrlList');
+  if (!urls.length) {
+    container.innerHTML = '<div class="url-empty">No URLs added yet</div>';
+    return;
+  }
+  container.innerHTML = urls.map(u => {
+    const labels = { match: 'Match', mismatch: 'Mismatch', error: 'Error', pending: 'Pending' };
+    const checked = u.last_checked ? new Date(u.last_checked + 'Z').toLocaleString() : 'Never';
+    const liveInfo = u.live_expiry ? ` · Live: ${u.live_expiry}` : '';
+    const errInfo  = u.last_error  ? ` · ${u.last_error}` : '';
+    return `
+      <div class="url-item">
+        <span class="url-status-badge url-status-${u.last_status}">${labels[u.last_status] || u.last_status}</span>
+        <div class="url-item-info">
+          <span class="url-text">${esc(u.url)}</span>
+          <span class="url-meta">${checked}${liveInfo}${errInfo}</span>
+        </div>
+        <div class="url-item-actions">
+          <button class="btn btn-icon" onclick="recheckCertUrl(${certId},${u.id})" title="Re-check now">&#8635;</button>
+          <button class="btn btn-icon danger" onclick="deleteCertUrl(${certId},${u.id})" title="Remove URL">&#215;</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+window.deleteCertUrl = async function(certId, urlId) {
+  const res = await fetch(`/api/certificates/${certId}/urls/${urlId}`, { method: 'DELETE' });
+  if (res.ok || res.status === 204) loadCertUrls(certId);
+};
+
+window.recheckCertUrl = async function(certId, urlId) {
+  const res = await fetch(`/api/certificates/${certId}/urls/${urlId}/check`, { method: 'POST' });
+  if (res.ok) loadCertUrls(certId);
+};
 
 // --- Groups ---
 async function loadGroups() {
@@ -161,7 +206,7 @@ function renderTable() {
   });
 
   if (filtered.length === 0) {
-    $('certBody').innerHTML = '<tr><td colspan="10" class="empty">No certificates found</td></tr>';
+    $('certBody').innerHTML = '<tr><td colspan="11" class="empty">No certificates found</td></tr>';
     return;
   }
 
@@ -194,6 +239,15 @@ function renderTable() {
       <button class="btn btn-icon danger" onclick="openDelete(${c.id}, '${esc(c.name)}')" title="Delete">&#128465;</button>
     `;
 
+    const urlTags = (c.urls && c.urls.length)
+      ? c.urls.map(u => {
+          let host = u.url;
+          try { host = new URL(u.url).hostname; } catch (_) {}
+          const labels = { match: 'Match', mismatch: 'Mismatch', error: 'Error', pending: 'Pending' };
+          return `<a href="${esc(u.url)}" target="_blank" rel="noopener" class="url-tag url-tag-${u.last_status}" title="${esc(u.url)} · ${labels[u.last_status] || u.last_status}">${esc(host)}</a>`;
+        }).join('')
+      : `<span style="color:var(--text-muted)">—</span>`;
+
     return `
       <tr data-id="${c.id}">
         <td>${statusBadge(days)}</td>
@@ -205,6 +259,7 @@ function renderTable() {
         <td>${pwCell}</td>
         <td><div class="host-tags">${groupBadges || '<span style="color:var(--text-muted)">—</span>'}</div></td>
         <td><div class="host-tags">${hosts || '<span style="color:var(--text-muted)">—</span>'}</div></td>
+        <td><div class="url-tags">${urlTags}</div></td>
         <td>
           <div class="action-btns">
             ${dlBtn}
@@ -251,6 +306,10 @@ function closeModal() {
   pendingCertData = null;
   currentFile = null;
   editMode = false;
+  currentCertId = null;
+  $('urlMonitorSection').style.display = 'none';
+  $('certUrlList').innerHTML = '';
+  $('certUrlInput').value = '';
 }
 
 function addHostRow(hostname = '', responsible_person = '') {
@@ -298,6 +357,8 @@ window.openEdit = function(id) {
   // Pre-check current group ids
   const currentGroupIds = (c.groups || []).map(g => g.id);
   populateGroupCheckList(currentGroupIds);
+  $('urlMonitorSection').style.display = '';
+  loadCertUrls(c.id);
   openModal('Edit Certificate');
 };
 
@@ -312,6 +373,36 @@ $('addBtn').addEventListener('click', () => openModal('Add Certificate'));
 $('modalClose').addEventListener('click', closeModal);
 $('cancelBtn').addEventListener('click', closeModal);
 $('addHostBtn').addEventListener('click', () => addHostRow());
+
+$('addCertUrlBtn').addEventListener('click', async () => {
+  const input = $('certUrlInput');
+  const url = input.value.trim();
+  if (!url || !currentCertId) return;
+  const btn = $('addCertUrlBtn');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  try {
+    const res = await fetch(`/api/certificates/${currentCertId}/urls`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    if (res.ok) {
+      input.value = '';
+      await loadCertUrls(currentCertId);
+    } else {
+      const data = await res.json();
+      alert(data.error || 'Failed to add URL');
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '+ Add URL';
+  }
+});
+
+$('certUrlInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('addCertUrlBtn').click(); }
+});
 
 $('modalOverlay').addEventListener('click', e => { if (e.target === $('modalOverlay')) closeModal(); });
 

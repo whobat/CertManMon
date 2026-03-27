@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
+const tls  = require('tls');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -113,6 +114,19 @@ db.exec(`
     details TEXT,
     ip TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS cert_urls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    certificate_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    last_checked TEXT,
+    last_status TEXT NOT NULL DEFAULT 'pending',
+    live_expiry TEXT,
+    live_subject TEXT,
+    last_error TEXT,
+    UNIQUE(certificate_id, url),
+    FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE
+  );
 `);
 
 // Migrations for existing databases
@@ -127,6 +141,7 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS user_group_members (group_id INTEGER N
 try { db.exec(`CREATE TABLE IF NOT EXISTS notification_log (id INTEGER PRIMARY KEY AUTOINCREMENT, certificate_id INTEGER NOT NULL, expiration_date TEXT NOT NULL, threshold_days INTEGER NOT NULL, recipient TEXT NOT NULL, sent_at TEXT DEFAULT (datetime('now')), UNIQUE (certificate_id, expiration_date, threshold_days, recipient))`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_prefix TEXT NOT NULL, permission TEXT NOT NULL DEFAULT 'read', active INTEGER NOT NULL DEFAULT 1, last_used_at TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), user_id INTEGER, username TEXT, action TEXT NOT NULL, target TEXT, details TEXT, ip TEXT)`); } catch (_) {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS cert_urls (id INTEGER PRIMARY KEY AUTOINCREMENT, certificate_id INTEGER NOT NULL, url TEXT NOT NULL, last_checked TEXT, last_status TEXT NOT NULL DEFAULT 'pending', live_expiry TEXT, live_subject TEXT, last_error TEXT, UNIQUE(certificate_id, url), FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)`); } catch (_) {}
 
 // Seed notification settings from environment variables (only if not already set in DB)
 {
@@ -744,7 +759,9 @@ const certListQuery = () => db.prepare(`
          (SELECT GROUP_CONCAT(cg.id || char(31) || cg.name, '||')
           FROM cert_group_members cgm
           JOIN cert_groups cg ON cg.id = cgm.group_id
-          WHERE cgm.certificate_id = c.id) AS groups_raw
+          WHERE cgm.certificate_id = c.id) AS groups_raw,
+         (SELECT GROUP_CONCAT(cu.id || char(31) || cu.url || char(31) || cu.last_status, '||')
+          FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw
   FROM certificates c ORDER BY c.expiration_date ASC
 `);
 
@@ -757,8 +774,12 @@ function parseCertRows(rows) {
     groups: c.groups_raw
       ? c.groups_raw.split('||').map(s => { const [id, name] = s.split('\x1f'); return { id: parseInt(id, 10), name }; })
       : [],
+    urls: c.urls_raw
+      ? c.urls_raw.split('||').map(s => { const [id, url, last_status] = s.split('\x1f'); return { id: parseInt(id, 10), url, last_status }; })
+      : [],
     hosts_raw: undefined,
     groups_raw: undefined,
+    urls_raw: undefined,
   }));
 }
 
@@ -822,6 +843,7 @@ app.put('/api/v1/certificates/:id', requireApiKey('readwrite'), async (req, res)
   db.prepare("INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)").run(`apikey:${req.apiKey.name}`, 'cert.update', updated.name, `fqdn:${updated.fqdn}`, req.socket?.remoteAddress || '');
   if (expiration_date && expiration_date > oldExpiry) {
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(() => {});
+    runUrlChecksForCert(id).catch(() => {});
   }
 });
 
@@ -904,7 +926,9 @@ app.get('/api/certificates', requireAuth, (req, res) => {
            (SELECT GROUP_CONCAT(cg.id || char(31) || cg.name, '||')
             FROM cert_group_members cgm
             JOIN cert_groups cg ON cg.id = cgm.group_id
-            WHERE cgm.certificate_id = c.id) AS groups_raw
+            WHERE cgm.certificate_id = c.id) AS groups_raw,
+           (SELECT GROUP_CONCAT(cu.id || char(31) || cu.url || char(31) || cu.last_status, '||')
+            FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw
     FROM certificates c
     WHERE
       ? = 'admin'
@@ -924,8 +948,12 @@ app.get('/api/certificates', requireAuth, (req, res) => {
     groups: c.groups_raw
       ? c.groups_raw.split('||').map(s => { const [id, name] = s.split('\x1f'); return { id: parseInt(id, 10), name }; })
       : [],
+    urls: c.urls_raw
+      ? c.urls_raw.split('||').map(s => { const [id, url, last_status] = s.split('\x1f'); return { id: parseInt(id, 10), url, last_status }; })
+      : [],
     hosts_raw: undefined,
-    groups_raw: undefined
+    groups_raw: undefined,
+    urls_raw: undefined
   }));
 
   res.json(result);
@@ -1088,6 +1116,7 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(err =>
       console.error('[notify] Renewal notification error:', err.message)
     );
+    runUrlChecksForCert(id).catch(err => console.error('[urlcheck] Renewal recheck error:', err.message));
   }
 });
 
@@ -1099,6 +1128,134 @@ app.delete('/api/certificates/:id', ...requireRole('admin', 'editor'), (req, res
   logEvent(req, 'cert.delete', cert.name, `fqdn:${cert.fqdn}`);
   res.status(204).end();
 });
+
+// --- Certificate URL monitoring ---
+
+app.get('/api/certificates/:id/urls', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!db.prepare('SELECT id FROM certificates WHERE id = ?').get(id)) return res.status(404).json({ error: 'Not found' });
+  res.json(db.prepare('SELECT * FROM cert_urls WHERE certificate_id = ? ORDER BY id ASC').all(id));
+});
+
+app.post('/api/certificates/:id/urls', ...requireRole('admin', 'editor'), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { url } = req.body;
+  if (!url || !url.trim()) return res.status(400).json({ error: 'url is required' });
+
+  const cert = db.prepare('SELECT id, expiration_date FROM certificates WHERE id = ?').get(id);
+  if (!cert) return res.status(404).json({ error: 'Certificate not found' });
+
+  try { const u = new URL(url.trim()); if (u.protocol !== 'https:') throw new Error(); }
+  catch { return res.status(400).json({ error: 'URL must be a valid HTTPS URL' }); }
+
+  let urlId;
+  try {
+    urlId = db.prepare('INSERT INTO cert_urls (certificate_id, url) VALUES (?, ?)').run(id, url.trim()).lastInsertRowid;
+  } catch (e) {
+    if (e.message && e.message.includes('UNIQUE')) return res.status(409).json({ error: 'This URL is already added to this certificate' });
+    throw e;
+  }
+
+  logEvent(req, 'cert.url_add', url.trim(), `cert_id:${id}`);
+
+  const result = await checkCertUrl(url.trim(), cert.expiration_date);
+  db.prepare(`UPDATE cert_urls SET last_checked = datetime('now'), last_status = ?, live_expiry = ?, live_subject = ?, last_error = ? WHERE id = ?`)
+    .run(result.status, result.live_expiry || null, result.live_subject || null, result.error || null, urlId);
+  db.prepare('INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)')
+    .run('system', 'urlcheck.' + result.status, url.trim(), `cert_id:${id},live_expiry:${result.live_expiry || 'n/a'}`, '');
+
+  res.status(201).json(db.prepare('SELECT * FROM cert_urls WHERE id = ?').get(urlId));
+});
+
+app.delete('/api/certificates/:id/urls/:urlId', ...requireRole('admin', 'editor'), (req, res) => {
+  const certId = parseInt(req.params.id, 10);
+  const urlId  = parseInt(req.params.urlId, 10);
+  const urlRow = db.prepare('SELECT * FROM cert_urls WHERE id = ? AND certificate_id = ?').get(urlId, certId);
+  if (!urlRow) return res.status(404).json({ error: 'Not found' });
+  db.prepare('DELETE FROM cert_urls WHERE id = ?').run(urlId);
+  logEvent(req, 'cert.url_remove', urlRow.url, `cert_id:${certId}`);
+  res.status(204).end();
+});
+
+app.post('/api/certificates/:id/urls/:urlId/check', ...requireRole('admin', 'editor'), async (req, res) => {
+  const certId = parseInt(req.params.id, 10);
+  const urlId  = parseInt(req.params.urlId, 10);
+  const urlRow = db.prepare('SELECT * FROM cert_urls WHERE id = ? AND certificate_id = ?').get(urlId, certId);
+  if (!urlRow) return res.status(404).json({ error: 'Not found' });
+  const cert = db.prepare('SELECT expiration_date FROM certificates WHERE id = ?').get(certId);
+  if (!cert) return res.status(404).json({ error: 'Certificate not found' });
+
+  const result = await checkCertUrl(urlRow.url, cert.expiration_date);
+  db.prepare(`UPDATE cert_urls SET last_checked = datetime('now'), last_status = ?, live_expiry = ?, live_subject = ?, last_error = ? WHERE id = ?`)
+    .run(result.status, result.live_expiry || null, result.live_subject || null, result.error || null, urlId);
+  db.prepare('INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)')
+    .run('system', 'urlcheck.' + result.status, urlRow.url, `cert_id:${certId},live_expiry:${result.live_expiry || 'n/a'}`, '');
+
+  res.json(db.prepare('SELECT * FROM cert_urls WHERE id = ?').get(urlId));
+});
+
+// --- URL certificate check helpers ---
+
+async function checkCertUrl(urlStr, expectedExpiry) {
+  return new Promise((resolve) => {
+    let parsedUrl;
+    try { parsedUrl = new URL(urlStr); }
+    catch { return resolve({ status: 'error', error: 'Invalid URL' }); }
+
+    if (parsedUrl.protocol !== 'https:') {
+      return resolve({ status: 'error', error: 'URL must use HTTPS' });
+    }
+
+    const host = parsedUrl.hostname;
+    const port = parsedUrl.port ? parseInt(parsedUrl.port, 10) : 443;
+    let resolved = false;
+    const done = (r) => { if (!resolved) { resolved = true; resolve(r); } };
+
+    const timer = setTimeout(() => { done({ status: 'error', error: 'Connection timed out' }); }, 10000);
+
+    const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: false }, () => {
+      clearTimeout(timer);
+      try {
+        const cert = socket.getPeerCertificate();
+        socket.destroy();
+        if (!cert || !cert.valid_to) return done({ status: 'error', error: 'No certificate received' });
+        const liveExpiry = new Date(cert.valid_to).toISOString().split('T')[0];
+        const liveSubject = (cert.subject && cert.subject.CN) || '';
+        const status = (expectedExpiry && liveExpiry === expectedExpiry) ? 'match' : 'mismatch';
+        done({ status, live_expiry: liveExpiry, live_subject: liveSubject });
+      } catch (e) {
+        done({ status: 'error', error: e.message });
+      }
+    });
+
+    socket.on('error', (err) => { clearTimeout(timer); done({ status: 'error', error: err.message }); });
+  });
+}
+
+async function runUrlChecksForCert(certId) {
+  const cert = db.prepare('SELECT expiration_date FROM certificates WHERE id = ?').get(certId);
+  if (!cert) return;
+  const urls = db.prepare('SELECT * FROM cert_urls WHERE certificate_id = ?').all(certId);
+  for (const urlRow of urls) {
+    try {
+      const result = await checkCertUrl(urlRow.url, cert.expiration_date);
+      db.prepare(
+        `UPDATE cert_urls SET last_checked = datetime('now'), last_status = ?, live_expiry = ?, live_subject = ?, last_error = ? WHERE id = ?`
+      ).run(result.status, result.live_expiry || null, result.live_subject || null, result.error || null, urlRow.id);
+      db.prepare('INSERT INTO audit_log (username, action, target, details, ip) VALUES (?, ?, ?, ?, ?)')
+        .run('system', 'urlcheck.' + result.status, urlRow.url, `cert_id:${certId},live_expiry:${result.live_expiry || 'n/a'}`, '');
+    } catch (e) {
+      console.error('[urlcheck] Error checking', urlRow.url, ':', e.message);
+    }
+  }
+}
+
+async function runAllUrlChecks() {
+  const certIds = db.prepare('SELECT DISTINCT certificate_id FROM cert_urls').all();
+  for (const row of certIds) {
+    await runUrlChecksForCert(row.certificate_id);
+  }
+}
 
 // --- Welcome email helper ---
 
@@ -1406,6 +1563,11 @@ app.post('/api/settings/notifications/run', ...requireRole('admin'), async (req,
 // Daily notification check at 08:00
 cron.schedule('0 8 * * *', () => {
   runNotificationCheck().catch(err => console.error('[notify] cron error:', err.message));
+});
+
+// URL certificate live-check every 30 minutes
+cron.schedule('*/30 * * * *', () => {
+  runAllUrlChecks().catch(err => console.error('[urlcheck] cron error:', err.message));
 });
 
 // --- Audit log routes ---

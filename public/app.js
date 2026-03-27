@@ -434,10 +434,43 @@ $('modalClose').addEventListener('click', closeModal);
 $('cancelBtn').addEventListener('click', closeModal);
 $('addHostBtn').addEventListener('click', () => addHostRow());
 
+function normaliseUrl(raw) {
+  // Returns { url, warning } — url is null if the protocol is unsupported.
+  const warning = $('certUrlWarning');
+  warning.style.display = 'none';
+  warning.textContent = '';
+
+  if (!raw) return { url: null };
+
+  // No protocol at all — prepend https://
+  if (!/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//.test(raw)) {
+    warning.textContent = 'No protocol specified — https:// has been added automatically.';
+    warning.style.display = '';
+    return { url: 'https://' + raw };
+  }
+
+  if (raw.startsWith('https://')) return { url: raw };
+
+  if (raw.startsWith('http://')) {
+    warning.textContent = 'Warning: http:// is not encrypted. Only https:// URLs are monitored for certificate validity.';
+    warning.style.display = '';
+    return { url: raw };
+  }
+
+  // Any other protocol (file://, ftp://, etc.) — block
+  const proto = raw.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\//)[0];
+  warning.textContent = `Unsupported protocol "${proto}" — only https:// URLs are supported.`;
+  warning.style.display = '';
+  return { url: null };
+}
+
 $('addCertUrlBtn').addEventListener('click', async () => {
   const input = $('certUrlInput');
-  const url = input.value.trim();
+  const { url } = normaliseUrl(input.value.trim());
   if (!url) return;
+
+  // Update the input to show the normalised value
+  input.value = url;
 
   if (currentCertId) {
     // Edit mode — save and check immediately
@@ -472,6 +505,11 @@ $('addCertUrlBtn').addEventListener('click', async () => {
 
 $('certUrlInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('addCertUrlBtn').click(); }
+});
+$('certUrlInput').addEventListener('input', () => {
+  const w = $('certUrlWarning');
+  w.style.display = 'none';
+  w.textContent = '';
 });
 
 $('modalOverlay').addEventListener('click', e => { if (e.target === $('modalOverlay')) closeModal(); });

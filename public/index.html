@@ -127,9 +127,10 @@
           <label>Monitored URLs <span class="label-hint">(HTTPS — checked on add, daily &amp; on renewal)</span></label>
           <div id="certUrlList" class="url-monitor-list"></div>
           <div class="url-add-row">
-            <input type="url" id="certUrlInput" placeholder="https://example.com" />
+            <input type="text" id="certUrlInput" placeholder="https://example.com" />
             <button type="button" class="btn btn-secondary" id="addCertUrlBtn">+ Add URL</button>
           </div>
+          <div id="certUrlWarning" style="display:none;margin-top:6px;font-size:13px;color:#f59e0b"></div>
         </div>
         <div class="form-group">
           <label>Access Groups <span class="label-hint">(no selection = admins only)</span></label>

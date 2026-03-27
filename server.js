@@ -1409,6 +1409,18 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
   const groupRows = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(certId);
   res.status(201).json({ ...cert, has_cert: !!cert_data, hosts: hostRows, groups: groupRows });
   logEvent(req, 'cert.create', cert.name, `fqdn:${cert.fqdn}`);
+
+  // Notify all responsible persons on the newly created certificate
+  const assignedPersons = new Map();
+  for (const h of hosts) {
+    if (!h.hostname?.trim() || !h.responsible_person?.trim()) continue;
+    const u = h.responsible_person.trim();
+    if (!assignedPersons.has(u)) assignedPersons.set(u, []);
+    assignedPersons.get(u).push(h.hostname.trim());
+  }
+  sendCertAssignmentEmails(name, fqdn, expiration_date, assignedPersons).catch(err =>
+    console.error('[notify] Assignment notification error:', err.message)
+  );
 });
 
 app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, res) => {
@@ -1422,6 +1434,12 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   const cert = db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
   if (!cert) return res.status(404).json({ error: 'Not found' });
   const oldExpiry = cert.expiration_date;
+
+  // Capture existing responsible persons before the update so we can diff afterwards
+  const oldResponsible = new Set(
+    db.prepare('SELECT DISTINCT responsible_person FROM hosts WHERE certificate_id = ?')
+      .all(id).map(r => r.responsible_person).filter(Boolean)
+  );
 
   // Only update cert_data if a new one was provided
   const newCertData = cert_data !== undefined ? cert_data : cert.cert_data;
@@ -1450,6 +1468,20 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   const groupRows = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(id);
   res.json({ ...updated, has_cert: !!newCertData, hosts: hostRows, groups: groupRows });
   logEvent(req, 'cert.update', updated.name, `fqdn:${updated.fqdn}`);
+
+  // Notify responsible persons who are newly assigned (not present in old host list)
+  const assignedPersons = new Map();
+  for (const h of hosts) {
+    if (!h.hostname?.trim() || !h.responsible_person?.trim()) continue;
+    const u = h.responsible_person.trim();
+    if (oldResponsible.has(u)) continue; // already was responsible — no notification needed
+    if (!assignedPersons.has(u)) assignedPersons.set(u, []);
+    assignedPersons.get(u).push(h.hostname.trim());
+  }
+  sendCertAssignmentEmails(name, fqdn, expiration_date, assignedPersons).catch(err =>
+    console.error('[notify] Assignment notification error:', err.message)
+  );
+
   if (expiration_date && expiration_date > oldExpiry) {
     sendRenewalNotification(id, updated.name, updated.fqdn, oldExpiry, expiration_date).catch(err =>
       console.error('[notify] Renewal notification error:', err.message)
@@ -1592,6 +1624,73 @@ async function runAllUrlChecks() {
   const certIds = db.prepare('SELECT DISTINCT certificate_id FROM cert_urls').all();
   for (const row of certIds) {
     await runUrlChecksForCert(row.certificate_id);
+  }
+}
+
+// --- Certificate assignment notification ---
+// assignments: Map<username, string[]>  (username → list of hostnames they are responsible for)
+
+async function sendCertAssignmentEmails(certName, fqdn, expirationDate, assignments) {
+  if (getSetting('notifications_enabled', 'false') !== 'true') return;
+  const transporter = createTransporter();
+  if (!transporter) return;
+
+  const fromAddress = getSetting('smtp_from', 'certmanmon@localhost');
+  const appUrl     = getSetting('app_url', '');
+  const expFormatted = new Date(expirationDate + 'T00:00:00').toLocaleDateString('en-GB', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  for (const [username, hostnames] of assignments) {
+    if (!username) continue;
+    const user = db.prepare('SELECT display_name, email FROM users WHERE username = ? AND active = 1').get(username);
+    if (!user || !user.email) continue;
+
+    const greeting = user.display_name ? `Hi ${htmlEsc(user.display_name)},` : 'Hi,';
+    const hostnameItems = hostnames.map(h => `<li style="padding:2px 0;font-family:monospace">${htmlEsc(h)}</li>`).join('');
+    const certLinkHtml = appUrl
+      ? `<a href="${htmlEsc(appUrl)}" style="color:#818cf8;text-decoration:none">${htmlEsc(certName)}</a>`
+      : `<strong>${htmlEsc(certName)}</strong>`;
+    const viewBtn = appUrl
+      ? `<a href="${htmlEsc(appUrl)}" style="display:inline-block;margin-top:20px;padding:10px 20px;background:#6366f1;color:#fff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600">View in CertManMon &rarr;</a>`
+      : '';
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:sans-serif;background:#1a1f2e;color:#e2e8f0;padding:24px">
+  <div style="max-width:520px;margin:0 auto;background:#252c3b;border-radius:8px;overflow:hidden">
+    <div style="background:#6366f1;padding:16px 24px">
+      <h2 style="margin:0;color:#fff;font-size:18px">Certificate Assignment</h2>
+    </div>
+    <div style="padding:24px">
+      <p style="margin:0 0 16px">${greeting}<br><br>
+      You have been assigned as responsible for the following host(s) on certificate ${certLinkHtml}:</p>
+      <ul style="margin:0 0 16px;padding-left:20px">${hostnameItems}</ul>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr><td style="padding:6px 0;color:#94a3b8;width:140px">Certificate</td><td style="padding:6px 0"><strong>${htmlEsc(certName)}</strong></td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">FQDN</td><td style="padding:6px 0;font-family:monospace">${htmlEsc(fqdn)}</td></tr>
+        <tr><td style="padding:6px 0;color:#94a3b8">Expires</td><td style="padding:6px 0">${htmlEsc(expFormatted)}</td></tr>
+      </table>
+      ${viewBtn}
+      <p style="margin:20px 0 0;font-size:12px;color:#64748b">If you did not expect this email, please contact your administrator.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    try {
+      await transporter.sendMail({
+        from: fromAddress,
+        to: user.email,
+        subject: `[CertManMon] You are responsible for certificate "${certName}"`,
+        html
+      });
+      console.log(`[notify] Assignment email sent to ${user.email} for cert "${certName}"`);
+    } catch (err) {
+      console.error(`[notify] Assignment email failed for ${user.email}:`, err.message);
+    }
   }
 }
 

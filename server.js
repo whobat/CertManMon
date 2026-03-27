@@ -365,7 +365,9 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Invalid credentials' });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND auth_provider = ? AND active = 1').get(username, 'local');
+  const user = db.prepare(
+    'SELECT * FROM users WHERE (username = ? OR email = ?) AND auth_provider = ? AND active = 1'
+  ).get(username, username, 'local');
   if (!user) {
     logEvent(req, 'auth.login_failed', username, 'invalid credentials');
     return res.status(401).json({ error: 'Invalid username or password' });

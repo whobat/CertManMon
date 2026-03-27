@@ -288,9 +288,10 @@ td.empty {
   inset: 0;
   background: rgba(0,0,0,0.6);
   z-index: 200;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 20px;
+  overflow-y: auto;
 }
 
 .modal-overlay.open { display: flex; }
@@ -302,6 +303,8 @@ td.empty {
   padding: 28px;
   width: 100%;
   max-width: 520px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   box-shadow: var(--shadow);
   animation: fadeIn 0.15s ease;
 }

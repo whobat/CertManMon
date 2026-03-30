@@ -36,6 +36,7 @@
       <button class="settings-tab" data-tab="auth">Authentication</button>
       <button class="settings-tab" data-tab="notifications">Notifications</button>
       <button class="settings-tab" data-tab="apikeys">API Keys</button>
+      <button class="settings-tab" data-tab="cronjobs">Scheduled Jobs</button>
       <button class="settings-tab" data-tab="logs">Logs</button>
     </div>
 
@@ -479,6 +480,32 @@
             <tr><td><span class="log-action-badge log-action-cert">GET</span></td><td><code>/api/v1/groups</code></td><td>Read</td><td>List all groups</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Scheduled Jobs Tab -->
+    <div class="settings-tab-content" id="tab-cronjobs">
+      <div class="settings-section">
+        <div class="settings-section-header">
+          <h3>Scheduled Jobs</h3>
+        </div>
+        <div id="cronJobsError" class="settings-error" style="display:none"></div>
+        <div id="cronJobsSuccess" class="settings-success" style="display:none"></div>
+        <div class="table-wrapper">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>Job</th>
+                <th>Description</th>
+                <th>Schedule (cron)</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="cronJobsBody">
+              <tr><td colspan="4" class="empty">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 

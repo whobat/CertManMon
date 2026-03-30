@@ -1301,11 +1301,12 @@ function extractCertViaTlsServer(pfxBuffer, password) {
     const timer = setTimeout(() => { cleanup(); reject(new Error('Certificate extraction timed out')); }, 10000);
 
     // SECLEVEL=0 allows legacy key sizes (e.g. short RSA) that some PFX files contain.
+    // ecdhCurve:'auto' ensures EC certificates with any named curve work.
+    // Pass pfx/passphrase directly (not via a pre-built secureContext) so cipher options apply cleanly.
     // This is safe here because the server is a loopback-only ephemeral instance.
-    const PFX_TLS_OPTS = { ciphers: 'ALL:@SECLEVEL=0', minVersion: 'TLSv1.2' };
+    const PFX_TLS_OPTS = { ciphers: 'ALL:COMPLEMENTOFALL:@SECLEVEL=0', minVersion: 'TLSv1.2', ecdhCurve: 'auto' };
 
-    const ctx = tls.createSecureContext({ pfx: pfxBuffer, passphrase: password });
-    server = tls.createServer({ secureContext: ctx, ...PFX_TLS_OPTS }, () => {});
+    server = tls.createServer({ pfx: pfxBuffer, passphrase: password, ...PFX_TLS_OPTS }, () => {});
     server.on('error', () => {});
 
     server.listen(0, '127.0.0.1', () => {

@@ -32,6 +32,7 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
     $('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'logs') loadLogs(logsCurrentPage);
     if (btn.dataset.tab === 'apikeys') loadApiKeys();
+    if (btn.dataset.tab === 'cronjobs') loadCronJobs();
   });
 });
 
@@ -1038,6 +1039,79 @@ $('clearLogsBtn').addEventListener('click', async () => {
     $('logsError').style.display = 'block';
   }
 });
+
+// --- Scheduled Jobs ---
+async function loadCronJobs() {
+  const body = $('cronJobsBody');
+  const err = $('cronJobsError');
+  const suc = $('cronJobsSuccess');
+  err.style.display = 'none';
+  suc.style.display = 'none';
+  body.innerHTML = '<tr><td colspan="4" class="empty">Loading...</td></tr>';
+  try {
+    const res = await fetch('/api/settings/cron');
+    if (!res.ok) throw new Error(await res.text());
+    const jobs = await res.json();
+    body.innerHTML = jobs.map(job => `
+      <tr>
+        <td><strong>${job.name}</strong></td>
+        <td>${job.description}</td>
+        <td>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="text" class="form-input" id="schedule-${job.id}" value="${job.schedule}" style="width:160px;font-family:monospace">
+            <button class="btn btn-secondary" onclick="saveCronSchedule('${job.id}')">Save</button>
+          </div>
+        </td>
+        <td>
+          <button class="btn btn-primary" onclick="runCronJob('${job.id}')">Run Now</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">Failed to load jobs.</td></tr>';
+    err.textContent = e.message;
+    err.style.display = '';
+  }
+}
+
+async function saveCronSchedule(jobId) {
+  const err = $('cronJobsError');
+  const suc = $('cronJobsSuccess');
+  err.style.display = 'none';
+  suc.style.display = 'none';
+  const schedule = $('schedule-' + jobId).value.trim();
+  try {
+    const res = await fetch(`/api/settings/cron/${jobId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schedule }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save');
+    suc.textContent = 'Schedule updated successfully.';
+    suc.style.display = '';
+  } catch (e) {
+    err.textContent = e.message;
+    err.style.display = '';
+  }
+}
+
+async function runCronJob(jobId) {
+  const err = $('cronJobsError');
+  const suc = $('cronJobsSuccess');
+  err.style.display = 'none';
+  suc.style.display = 'none';
+  try {
+    const res = await fetch(`/api/settings/cron/${jobId}/run`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to run job');
+    suc.textContent = 'Job triggered successfully.';
+    suc.style.display = '';
+  } catch (e) {
+    err.textContent = e.message;
+    err.style.display = '';
+  }
+}
 
 // --- Init ---
 (async () => {

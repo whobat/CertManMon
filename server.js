@@ -175,6 +175,8 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS cert_urls (id INTEGER PRIMARY KEY AUTO
     ['threshold_3',            process.env.THRESHOLD_3],
     ['admin_emails',           process.env.ADMIN_EMAILS],
     ['app_url',                process.env.APP_URL],
+    ['cron_notify_schedule',   '0 8 * * *'],
+    ['cron_urlcheck_schedule', '*/30 * * * *'],
   ];
   for (const [key, val] of envSettings) {
     if (val !== undefined) upsertIfMissing.run(key, val);
@@ -2113,14 +2115,97 @@ app.post('/api/settings/notifications/run', ...requireRole('admin'), async (req,
   }
 });
 
-// Daily notification check at 08:00
-cron.schedule('0 8 * * *', () => {
-  runNotificationCheck().catch(err => console.error('[notify] cron error:', err.message));
+// --- Dynamic cron job management ---
+const cronJobs = {};
+
+function initCronJobs() {
+  if (cronJobs.notify) { cronJobs.notify.stop(); delete cronJobs.notify; }
+  if (cronJobs.urlcheck) { cronJobs.urlcheck.stop(); delete cronJobs.urlcheck; }
+
+  const notifySchedule = getSetting('cron_notify_schedule', '0 8 * * *');
+  const urlcheckSchedule = getSetting('cron_urlcheck_schedule', '*/30 * * * *');
+
+  cronJobs.notify = cron.schedule(notifySchedule, () => {
+    runNotificationCheck().catch(err => console.error('[notify] cron error:', err.message));
+  });
+  cronJobs.urlcheck = cron.schedule(urlcheckSchedule, () => {
+    runAllUrlChecks().catch(err => console.error('[urlcheck] cron error:', err.message));
+  });
+}
+
+initCronJobs();
+
+// --- Cron job management routes ---
+
+const CRON_JOB_META = {
+  notify: {
+    name: 'Daily Notification Check',
+    description: 'Sends expiry warning emails based on configured thresholds.',
+    settingKey: 'cron_notify_schedule',
+    defaultSchedule: '0 8 * * *',
+  },
+  urlcheck: {
+    name: 'URL Certificate Check',
+    description: 'Live-checks TLS certificates on all configured URLs.',
+    settingKey: 'cron_urlcheck_schedule',
+    defaultSchedule: '*/30 * * * *',
+  },
+};
+
+app.get('/api/settings/cron', ...requireRole('admin'), (req, res) => {
+  const jobs = Object.entries(CRON_JOB_META).map(([id, meta]) => ({
+    id,
+    name: meta.name,
+    description: meta.description,
+    schedule: getSetting(meta.settingKey, meta.defaultSchedule),
+  }));
+  res.json(jobs);
 });
 
-// URL certificate live-check every 30 minutes
-cron.schedule('*/30 * * * *', () => {
-  runAllUrlChecks().catch(err => console.error('[urlcheck] cron error:', err.message));
+app.put('/api/settings/cron/:jobId', ...requireRole('admin'), (req, res) => {
+  const { jobId } = req.params;
+  const meta = CRON_JOB_META[jobId];
+  if (!meta) return res.status(404).json({ error: 'Unknown job' });
+
+  const { schedule } = req.body;
+  if (!schedule || typeof schedule !== 'string') return res.status(400).json({ error: 'schedule is required' });
+  if (!cron.validate(schedule)) return res.status(400).json({ error: 'Invalid cron expression' });
+
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .run(meta.settingKey, schedule);
+
+  // Restart the specific job with the new schedule
+  if (cronJobs[jobId]) { cronJobs[jobId].stop(); delete cronJobs[jobId]; }
+  if (jobId === 'notify') {
+    cronJobs.notify = cron.schedule(schedule, () => {
+      runNotificationCheck().catch(err => console.error('[notify] cron error:', err.message));
+    });
+  } else if (jobId === 'urlcheck') {
+    cronJobs.urlcheck = cron.schedule(schedule, () => {
+      runAllUrlChecks().catch(err => console.error('[urlcheck] cron error:', err.message));
+    });
+  }
+
+  logEvent(req, 'settings.cron_updated', jobId, `Cron schedule updated to: ${schedule}`);
+  res.json({ ok: true });
+});
+
+app.post('/api/settings/cron/:jobId/run', ...requireRole('admin'), async (req, res) => {
+  const { jobId } = req.params;
+  const meta = CRON_JOB_META[jobId];
+  if (!meta) return res.status(404).json({ error: 'Unknown job' });
+
+  try {
+    if (jobId === 'notify') {
+      await runNotificationCheck();
+    } else if (jobId === 'urlcheck') {
+      await runAllUrlChecks();
+    }
+    logEvent(req, 'settings.cron_run_manual', jobId, `Manual run triggered for: ${meta.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Audit log routes ---

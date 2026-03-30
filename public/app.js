@@ -136,8 +136,8 @@ function renderUrlList(urls, certId) {
           <span class="url-meta">${checked}${liveInfo}${errInfo}</span>
         </div>
         <div class="url-item-actions">
-          <button class="btn btn-icon" onclick="recheckCertUrl(${certId},${u.id})" title="Re-check now">&#8635;</button>
-          <button class="btn btn-icon danger" onclick="deleteCertUrl(${certId},${u.id})" title="Remove URL">&#215;</button>
+          <button type="button" class="btn btn-icon" onclick="recheckCertUrl(${certId},${u.id})" title="Re-check now">&#8635;</button>
+          <button type="button" class="btn btn-icon danger" onclick="deleteCertUrl(${certId},${u.id})" title="Remove URL">&#215;</button>
         </div>
       </div>`;
   }).join('');

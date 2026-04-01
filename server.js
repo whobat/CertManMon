@@ -154,6 +154,19 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS notification_log (id INTEGER PRIMARY K
 try { db.exec(`CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_prefix TEXT NOT NULL, permission TEXT NOT NULL DEFAULT 'read', active INTEGER NOT NULL DEFAULT 1, last_used_at TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), user_id INTEGER, username TEXT, action TEXT NOT NULL, target TEXT, details TEXT, ip TEXT)`); } catch (_) {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS cert_urls (id INTEGER PRIMARY KEY AUTOINCREMENT, certificate_id INTEGER NOT NULL, url TEXT NOT NULL, last_checked TEXT, last_status TEXT NOT NULL DEFAULT 'pending', live_expiry TEXT, live_subject TEXT, last_error TEXT, UNIQUE(certificate_id, url), FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)`); } catch (_) {}
+try { db.exec(`CREATE TABLE IF NOT EXISTS certificate_files (id INTEGER PRIMARY KEY AUTOINCREMENT, certificate_id INTEGER NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, file_data TEXT NOT NULL, password TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', file_size INTEGER NOT NULL DEFAULT 0, is_auto_extracted INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY (certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)`); } catch (_) {}
+
+// Migrate existing cert_data into certificate_files (one-time)
+try {
+  const migrated = db.prepare(`SELECT COUNT(*) AS cnt FROM certificate_files`).get().cnt;
+  if (migrated === 0) {
+    const rows = db.prepare(`SELECT id, name, cert_data, password FROM certificates WHERE cert_data IS NOT NULL AND cert_data != ''`).all();
+    const ins = db.prepare(`INSERT INTO certificate_files (certificate_id, filename, format, file_data, password, description, file_size, is_auto_extracted) VALUES (?, ?, 'pem', ?, '', 'Migrated from legacy storage', ?, 0)`);
+    for (const r of rows) {
+      ins.run(r.id, r.name.replace(/[^a-zA-Z0-9._-]/g, '_') + '.pem', r.cert_data, Buffer.byteLength(r.cert_data, 'utf8'));
+    }
+  }
+} catch (_) {}
 
 // Seed notification settings from environment variables (only if not already set in DB)
 {
@@ -218,9 +231,9 @@ function addToDefaultViewers(userId) {
   }
 }
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Security headers
 app.use((req, res, next) => {
@@ -934,7 +947,10 @@ function requireApiKey(permission = 'read') {
 
 const certListQuery = () => db.prepare(`
   SELECT c.id, c.name, c.fqdn, c.expiration_date, c.password, c.note, c.created_at,
-         CASE WHEN c.cert_data IS NOT NULL AND c.cert_data != '' THEN 1 ELSE 0 END AS has_cert,
+         CASE WHEN c.cert_data IS NOT NULL AND c.cert_data != ''
+              OR EXISTS (SELECT 1 FROM certificate_files WHERE certificate_id = c.id)
+              THEN 1 ELSE 0 END AS has_cert,
+         (SELECT COUNT(*) FROM certificate_files WHERE certificate_id = c.id) AS file_count,
          (SELECT GROUP_CONCAT(h.hostname || char(31) || h.responsible_person, '||')
           FROM hosts h WHERE h.certificate_id = c.id) AS hosts_raw,
          (SELECT GROUP_CONCAT(cg.id || char(31) || cg.name, '||')
@@ -942,7 +958,9 @@ const certListQuery = () => db.prepare(`
           JOIN cert_groups cg ON cg.id = cgm.group_id
           WHERE cgm.certificate_id = c.id) AS groups_raw,
          (SELECT GROUP_CONCAT(cu.id || char(31) || cu.url || char(31) || cu.last_status, '||')
-          FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw
+          FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw,
+         (SELECT GROUP_CONCAT(cf.id || char(31) || cf.filename || char(31) || cf.format, '||')
+          FROM certificate_files cf WHERE cf.certificate_id = c.id) AS files_raw
   FROM certificates c ORDER BY c.expiration_date ASC
 `);
 
@@ -958,9 +976,13 @@ function parseCertRows(rows) {
     urls: c.urls_raw
       ? c.urls_raw.split('||').map(s => { const [id, url, last_status] = s.split('\x1f'); return { id: parseInt(id, 10), url, last_status }; })
       : [],
+    cert_files: c.files_raw
+      ? c.files_raw.split('||').map(s => { const [id, filename, format] = s.split('\x1f'); return { id: parseInt(id, 10), filename, format }; })
+      : [],
     hosts_raw: undefined,
     groups_raw: undefined,
     urls_raw: undefined,
+    files_raw: undefined,
   }));
 }
 
@@ -973,7 +995,8 @@ app.get('/api/v1/certificates/:id', requireApiKey('read'), (req, res) => {
   if (!cert) return res.status(404).json({ error: 'Not found' });
   const hosts = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(req.params.id);
   const groups = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(req.params.id);
-  res.json({ ...cert, has_cert: !!cert.cert_data, cert_data: undefined, hosts, groups });
+  const certFiles = db.prepare('SELECT id, filename, format, password, description, file_size, is_auto_extracted, created_at FROM certificate_files WHERE certificate_id = ? ORDER BY id ASC').all(req.params.id);
+  res.json({ ...cert, has_cert: !!cert.cert_data || certFiles.length > 0, file_count: certFiles.length, cert_data: undefined, hosts, groups, files: certFiles.map(f => ({ ...f, password: f.password || cert.password })) });
 });
 
 app.post('/api/v1/certificates', requireApiKey('readwrite'), (req, res) => {
@@ -1137,7 +1160,10 @@ app.get('/api/certificates', requireAuth, (req, res) => {
   // Restricted viewers see all certs; normal non-admins see only their groups
   const certs = db.prepare(`
     SELECT c.id, c.name, c.fqdn, c.expiration_date, c.password, c.note, c.created_at,
-           CASE WHEN c.cert_data IS NOT NULL AND c.cert_data != '' THEN 1 ELSE 0 END AS has_cert,
+           CASE WHEN c.cert_data IS NOT NULL AND c.cert_data != ''
+                OR EXISTS (SELECT 1 FROM certificate_files WHERE certificate_id = c.id)
+                THEN 1 ELSE 0 END AS has_cert,
+           (SELECT COUNT(*) FROM certificate_files WHERE certificate_id = c.id) AS file_count,
            (SELECT GROUP_CONCAT(h.hostname || char(31) || h.responsible_person, '||')
             FROM hosts h WHERE h.certificate_id = c.id) AS hosts_raw,
            (SELECT GROUP_CONCAT(cg.id || char(31) || cg.name, '||')
@@ -1145,7 +1171,9 @@ app.get('/api/certificates', requireAuth, (req, res) => {
             JOIN cert_groups cg ON cg.id = cgm.group_id
             WHERE cgm.certificate_id = c.id) AS groups_raw,
            (SELECT GROUP_CONCAT(cu.id || char(31) || cu.url || char(31) || cu.last_status, '||')
-            FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw
+            FROM cert_urls cu WHERE cu.certificate_id = c.id) AS urls_raw,
+           (SELECT GROUP_CONCAT(cf.id || char(31) || cf.filename || char(31) || cf.format, '||')
+            FROM certificate_files cf WHERE cf.certificate_id = c.id) AS files_raw
     FROM certificates c
     WHERE
       ? = 'admin'
@@ -1170,9 +1198,13 @@ app.get('/api/certificates', requireAuth, (req, res) => {
     urls: c.urls_raw
       ? c.urls_raw.split('||').map(s => { const [id, url, last_status] = s.split('\x1f'); return { id: parseInt(id, 10), url, last_status }; })
       : [],
+    cert_files: c.files_raw
+      ? c.files_raw.split('||').map(s => { const [id, filename, format] = s.split('\x1f'); return { id: parseInt(id, 10), filename, format }; })
+      : [],
     hosts_raw: undefined,
     groups_raw: undefined,
-    urls_raw: undefined
+    urls_raw: undefined,
+    files_raw: undefined
   }));
 
   res.json(result);
@@ -1357,18 +1389,34 @@ app.post('/api/certificates/parse', requireAuth, upload.single('cert'), async (r
     }
 
     const meta = extractCertMeta(pem);
-    res.json({ ...meta, cert_data: pem });
+    res.json({
+      ...meta,
+      cert_data: pem,
+      original_file: req.file.buffer.toString('base64'),
+      original_filename: req.file.originalname,
+      original_format: isPem ? 'pem' : 'pfx',
+      original_size: req.file.buffer.length
+    });
   } catch (e) {
     const status = e.needsPassword ? 401 : 400;
     res.status(status).json({ error: e.message, needsPassword: !!e.needsPassword });
   }
 });
 
-// Download stored certificate file
+// Download stored certificate file (legacy endpoint - serves PEM from certificate_files or cert_data fallback)
 app.get('/api/certificates/:id/download', requireAuth, (req, res) => {
   if (isRestrictedViewer(req.session.userId, req.session.userRole)) {
     return res.status(403).json({ error: 'Download not permitted for your account' });
   }
+  // Try certificate_files first
+  const file = db.prepare(`SELECT filename, file_data, format FROM certificate_files WHERE certificate_id = ? AND format = 'pem' ORDER BY id ASC LIMIT 1`).get(req.params.id);
+  if (file) {
+    res.setHeader('Content-Type', 'application/x-pem-file');
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+    logEvent(req, 'cert.download', file.filename);
+    return res.send(file.file_data);
+  }
+  // Legacy fallback
   const cert = db.prepare('SELECT name, cert_data FROM certificates WHERE id = ?').get(req.params.id);
   if (!cert) return res.status(404).json({ error: 'Not found' });
   if (!cert.cert_data) return res.status(404).json({ error: 'No certificate file stored' });
@@ -1377,6 +1425,90 @@ app.get('/api/certificates/:id/download', requireAuth, (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   logEvent(req, 'cert.download', cert.name);
   res.send(cert.cert_data);
+});
+
+// List files for a certificate
+app.get('/api/certificates/:id/files', requireAuth, (req, res) => {
+  const cert = db.prepare('SELECT id, password FROM certificates WHERE id = ?').get(req.params.id);
+  if (!cert) return res.status(404).json({ error: 'Not found' });
+  const restricted = isRestrictedViewer(req.session.userId, req.session.userRole);
+  const isAdmin = req.session.userRole === 'admin';
+  const files = db.prepare('SELECT id, filename, format, password, description, file_size, is_auto_extracted, created_at FROM certificate_files WHERE certificate_id = ? ORDER BY id ASC').all(req.params.id);
+  res.json(files.map(f => ({
+    ...f,
+    password: (isAdmin || !restricted) ? (f.password || cert.password) : ''
+  })));
+});
+
+// Download a specific certificate file
+app.get('/api/certificates/:id/files/:fileId/download', requireAuth, (req, res) => {
+  if (isRestrictedViewer(req.session.userId, req.session.userRole)) {
+    return res.status(403).json({ error: 'Download not permitted for your account' });
+  }
+  const file = db.prepare('SELECT filename, format, file_data FROM certificate_files WHERE id = ? AND certificate_id = ?').get(req.params.fileId, req.params.id);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  const contentTypes = { pem: 'application/x-pem-file', pfx: 'application/x-pkcs12', der: 'application/x-x509-ca-cert', cer: 'application/x-x509-ca-cert', p7b: 'application/x-pkcs7-certificates' };
+  res.setHeader('Content-Type', contentTypes[file.format] || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+  logEvent(req, 'cert.file_download', file.filename);
+  // PEM is stored as text, binary formats as base64
+  if (file.format === 'pem') {
+    res.send(file.file_data);
+  } else {
+    res.send(Buffer.from(file.file_data, 'base64'));
+  }
+});
+
+// Upload additional file to a certificate
+app.post('/api/certificates/:id/files', ...requireRole('admin', 'editor'), upload.single('file'), async (req, res) => {
+  const cert = db.prepare('SELECT id, name, password FROM certificates WHERE id = ?').get(req.params.id);
+  if (!cert) return res.status(404).json({ error: 'Not found' });
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  const ext = (req.file.originalname.match(/\.([^.]+)$/) || [])[1]?.toLowerCase() || '';
+  const format = req.body.format || (['pfx', 'p12'].includes(ext) ? 'pfx' : ['der'].includes(ext) ? 'der' : ['p7b'].includes(ext) ? 'p7b' : 'pem');
+  const isBinary = format !== 'pem';
+  const fileData = isBinary ? req.file.buffer.toString('base64') : req.file.buffer.toString('utf8');
+  const filePassword = req.body.password || '';
+
+  // For PFX files, validate the password by trying to parse
+  let pem = null;
+  if (format === 'pfx') {
+    const effectivePassword = filePassword || cert.password;
+    try {
+      pem = await parsePfx(req.file.buffer, effectivePassword);
+    } catch (e) {
+      if (e.needsPassword) {
+        return res.status(401).json({ error: e.message, needsPassword: true });
+      }
+      return res.status(400).json({ error: e.message });
+    }
+  }
+
+  // Only store file-level password if different from cert password
+  const storedPassword = filePassword && filePassword !== cert.password ? filePassword : '';
+
+  const ins = db.prepare('INSERT INTO certificate_files (certificate_id, filename, format, file_data, password, description, file_size, is_auto_extracted) VALUES (?, ?, ?, ?, ?, ?, ?, 0)');
+  const info = ins.run(cert.id, req.file.originalname, format, fileData, storedPassword, req.body.description || '', req.file.buffer.length);
+  logEvent(req, 'cert.file_upload', req.file.originalname, `cert:${cert.name}`);
+
+  // If PFX uploaded and PEM was extracted, store it too
+  if (format === 'pfx' && pem) {
+    const pemFilename = req.file.originalname.replace(/\.[^.]+$/, '') + '_extracted.pem';
+    db.prepare('INSERT INTO certificate_files (certificate_id, filename, format, file_data, password, description, file_size, is_auto_extracted) VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
+      .run(cert.id, pemFilename, 'pem', pem, '', 'Auto-extracted from ' + req.file.originalname, Buffer.byteLength(pem, 'utf8'));
+  }
+
+  res.status(201).json({ id: Number(info.lastInsertRowid), filename: req.file.originalname, format });
+});
+
+// Delete a certificate file
+app.delete('/api/certificates/:id/files/:fileId', ...requireRole('admin', 'editor'), (req, res) => {
+  const file = db.prepare('SELECT id, filename FROM certificate_files WHERE id = ? AND certificate_id = ?').get(req.params.fileId, req.params.id);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  db.prepare('DELETE FROM certificate_files WHERE id = ?').run(req.params.fileId);
+  logEvent(req, 'cert.file_delete', file.filename);
+  res.json({ ok: true });
 });
 
 app.get('/api/certificates/:id', requireAuth, (req, res) => {
@@ -1406,18 +1538,25 @@ app.get('/api/certificates/:id', requireAuth, (req, res) => {
 
   const hosts = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(certId);
   const groups = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(certId);
+  const certFiles = db.prepare('SELECT id, filename, format, password, description, file_size, is_auto_extracted, created_at FROM certificate_files WHERE certificate_id = ? ORDER BY id ASC').all(certId);
+  const fileCount = certFiles.length;
   res.json({
     ...cert,
     password: (isAdmin || !restricted) ? cert.password : '',
-    has_cert: !!cert.cert_data,
+    has_cert: !!cert.cert_data || fileCount > 0,
+    file_count: fileCount,
     cert_data: undefined,
     hosts,
-    groups
+    groups,
+    files: certFiles.map(f => ({
+      ...f,
+      password: (isAdmin || !restricted) ? (f.password || cert.password) : ''
+    }))
   });
 });
 
 app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
-  const { name, fqdn, expiration_date, password = '', note = '', cert_data = null, hosts = [], group_ids = [] } = req.body;
+  const { name, fqdn, expiration_date, password = '', note = '', cert_data = null, hosts = [], group_ids = [], files = [] } = req.body;
   const validationError = validateCertFields(name, fqdn, expiration_date);
   if (validationError) return res.status(400).json({ error: validationError });
   if (note && note.length > 1000) return res.status(400).json({ error: 'note must be under 1000 characters' });
@@ -1426,6 +1565,7 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
   const insertHost = db.prepare('INSERT INTO hosts (certificate_id, hostname, responsible_person) VALUES (?, ?, ?)');
   const deleteGroupMembers = db.prepare('DELETE FROM cert_group_members WHERE certificate_id = ?');
   const insertGroupMember = db.prepare('INSERT INTO cert_group_members (group_id, certificate_id) VALUES (?, ?)');
+  const insertFile = db.prepare('INSERT INTO certificate_files (certificate_id, filename, format, file_data, password, description, file_size, is_auto_extracted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 
   const tx = db.transaction(() => {
     const info = insert.run(name, fqdn, expiration_date, password, note, cert_data);
@@ -1437,6 +1577,11 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
     for (const gid of group_ids) {
       try { insertGroupMember.run(gid, certId); } catch (_) {}
     }
+    // Insert certificate files
+    for (const f of files) {
+      const filePassword = f.password && f.password !== password ? f.password : '';
+      insertFile.run(certId, f.filename, f.format, f.file_data, filePassword, f.description || '', f.file_size || 0, f.is_auto_extracted ? 1 : 0);
+    }
     return certId;
   });
 
@@ -1444,7 +1589,8 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
   const cert = db.prepare('SELECT id, name, fqdn, expiration_date, password, note, created_at FROM certificates WHERE id = ?').get(certId);
   const hostRows = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(certId);
   const groupRows = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(certId);
-  res.status(201).json({ ...cert, has_cert: !!cert_data, hosts: hostRows, groups: groupRows });
+  const fileCount = db.prepare('SELECT COUNT(*) AS cnt FROM certificate_files WHERE certificate_id = ?').get(certId).cnt;
+  res.status(201).json({ ...cert, has_cert: !!cert_data || fileCount > 0, file_count: fileCount, hosts: hostRows, groups: groupRows });
   logEvent(req, 'cert.create', cert.name, `fqdn:${cert.fqdn}`);
 
   // Notify all responsible persons on the newly created certificate
@@ -1461,7 +1607,7 @@ app.post('/api/certificates', ...requireRole('admin', 'editor'), (req, res) => {
 });
 
 app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, res) => {
-  const { name, fqdn, expiration_date, password = '', note = '', cert_data, hosts = [], group_ids = [] } = req.body;
+  const { name, fqdn, expiration_date, password = '', note = '', cert_data, hosts = [], group_ids = [], files = [] } = req.body;
   const id = req.params.id;
 
   const validationError = validateCertFields(name, fqdn, expiration_date);
@@ -1492,6 +1638,7 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
   const insertHost = db.prepare('INSERT INTO hosts (certificate_id, hostname, responsible_person) VALUES (?, ?, ?)');
   const deleteGroupMembers = db.prepare('DELETE FROM cert_group_members WHERE certificate_id = ?');
   const insertGroupMember = db.prepare('INSERT INTO cert_group_members (group_id, certificate_id) VALUES (?, ?)');
+  const insertFile = db.prepare('INSERT INTO certificate_files (certificate_id, filename, format, file_data, password, description, file_size, is_auto_extracted) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 
   const tx = db.transaction(() => {
     update.run(name, fqdn, expiration_date, password, note, newCertData, id);
@@ -1503,13 +1650,19 @@ app.put('/api/certificates/:id', ...requireRole('admin', 'editor'), async (req, 
     for (const gid of group_ids) {
       try { insertGroupMember.run(gid, id); } catch (_) {}
     }
+    // Insert new certificate files (additive)
+    for (const f of files) {
+      const filePassword = f.password && f.password !== password ? f.password : '';
+      insertFile.run(id, f.filename, f.format, f.file_data, filePassword, f.description || '', f.file_size || 0, f.is_auto_extracted ? 1 : 0);
+    }
   });
 
   tx();
   const updated = db.prepare('SELECT id, name, fqdn, expiration_date, password, note, created_at FROM certificates WHERE id = ?').get(id);
   const hostRows = db.prepare('SELECT hostname, responsible_person FROM hosts WHERE certificate_id = ?').all(id);
   const groupRows = db.prepare('SELECT cg.id, cg.name FROM cert_groups cg JOIN cert_group_members cgm ON cgm.group_id = cg.id WHERE cgm.certificate_id = ?').all(id);
-  res.json({ ...updated, has_cert: !!newCertData, hosts: hostRows, groups: groupRows });
+  const fileCount = db.prepare('SELECT COUNT(*) AS cnt FROM certificate_files WHERE certificate_id = ?').get(id).cnt;
+  res.json({ ...updated, has_cert: !!newCertData || fileCount > 0, file_count: fileCount, hosts: hostRows, groups: groupRows });
   logEvent(req, 'cert.update', updated.name, `fqdn:${updated.fqdn}`);
 
   // Notify responsible persons for any (username, hostname) pair that is new.

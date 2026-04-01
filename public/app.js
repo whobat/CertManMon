@@ -2,6 +2,7 @@ let certs = [];
 let deleteTargetId = null;
 let editMode = false;
 let pendingCertData = null; // holds PEM text from uploaded file
+let pendingFiles = [];     // holds file entries to save with the certificate
 let currentFile = null;    // tracks the last selected file for PFX re-parse
 let availableGroups = [];
 let availableUsers = [];
@@ -273,11 +274,23 @@ function renderTable() {
     const expFormatted = new Date(c.expiration_date + 'T00:00:00').toLocaleDateString(undefined, {
       year: 'numeric', month: 'short', day: 'numeric'
     });
-    const dlBtn = !c.has_cert
-      ? `<button class="btn btn-icon" disabled title="No certificate file stored" style="opacity:0.35;cursor:default">&#8659;</button>`
-      : window.userRestricted
-        ? `<button class="btn btn-icon" disabled title="Download not permitted for your account" style="opacity:0.35;cursor:default">&#8659;</button>`
-        : `<a class="btn btn-icon" href="/api/certificates/${c.id}/download" download title="Download certificate">&#8659;</a>`;
+    let dlBtn;
+    if (!c.has_cert) {
+      dlBtn = `<button class="btn btn-icon" disabled title="No certificate file stored" style="opacity:0.35;cursor:default">&#8659;</button>`;
+    } else if (window.userRestricted) {
+      dlBtn = `<button class="btn btn-icon" disabled title="Download not permitted for your account" style="opacity:0.35;cursor:default">&#8659;</button>`;
+    } else if (c.cert_files && c.cert_files.length > 1) {
+      dlBtn = `<div class="dl-dropdown">
+        <button class="btn btn-icon dl-dropdown-toggle" title="Download certificate files">&#8659;</button>
+        <div class="dl-dropdown-menu" id="dl-menu-${c.id}">
+          ${c.cert_files.map(f => `<a href="/api/certificates/${c.id}/files/${f.id}/download" download class="dl-dropdown-item"><span class="format-badge format-badge-${f.format}">${f.format}</span> ${esc(f.filename)}</a>`).join('')}
+        </div>
+      </div>`;
+    } else if (c.cert_files && c.cert_files.length === 1) {
+      dlBtn = `<a class="btn btn-icon" href="/api/certificates/${c.id}/files/${c.cert_files[0].id}/download" download title="Download ${c.cert_files[0].filename}">&#8659;</a>`;
+    } else {
+      dlBtn = `<a class="btn btn-icon" href="/api/certificates/${c.id}/download" download title="Download certificate">&#8659;</a>`;
+    }
     const pwCell = (c.password && !window.userRestricted)
       ? `<div class="pw-cell">
            <span class="pw-mask" data-pw="${esc(c.password)}">••••••••</span>
@@ -358,6 +371,7 @@ function closeModal() {
   $('pfxPasswordSection').style.display = 'none';
   $('pfxPassword').value = '';
   pendingCertData = null;
+  pendingFiles = [];
   currentFile = null;
   editMode = false;
   currentCertId = null;
@@ -365,6 +379,11 @@ function closeModal() {
   $('urlMonitorSection').style.display = 'none';
   $('certUrlList').innerHTML = '';
   $('certUrlInput').value = '';
+  $('certFilesSection').style.display = 'none';
+  $('certFilesList').innerHTML = '';
+  additionalPendingFile = null;
+  $('additionalFilePassword').style.display = 'none';
+  $('addFilePassword').value = '';
 }
 
 function addHostRow(hostname = '', responsible_person = '') {
@@ -437,6 +456,8 @@ window.openEdit = function(id) {
   }
   $('urlMonitorSection').style.display = '';
   loadCertUrls(c.id);
+  // Load and display stored files
+  loadCertFiles(c.id);
   openModal('Edit Certificate');
   // Populate groups AFTER openModal() — openModal resets the checklist to empty
   const currentGroupIds = (c.groups || []).map(g => g.id);
@@ -550,7 +571,8 @@ $('certForm').addEventListener('submit', async e => {
     note: $('certNote').value.trim(),
     hosts: getHostValues(),
     cert_data: pendingCertData,
-    group_ids: getSelectedGroupIds()
+    group_ids: getSelectedGroupIds(),
+    files: pendingFiles
   };
   const id = $('certId').value;
   if (editMode && id) {
@@ -609,10 +631,57 @@ async function parseCertFile(file, password = '') {
     pendingCertData = data.cert_data;
     $('pfxPasswordSection').style.display = 'none';
 
+    // Build file entries for saving (keep existing pending files from manual adds)
+    const newFiles = [];
+    if (data.original_format === 'pfx') {
+      // Store original PFX + auto-extracted PEM
+      newFiles.push({
+        filename: data.original_filename,
+        format: 'pfx',
+        file_data: data.original_file,
+        password: password || '',
+        description: '',
+        file_size: data.original_size,
+        is_auto_extracted: false
+      });
+      newFiles.push({
+        filename: data.original_filename.replace(/\.[^.]+$/, '') + '_extracted.pem',
+        format: 'pem',
+        file_data: data.cert_data,
+        password: '',
+        description: 'Auto-extracted from ' + data.original_filename,
+        file_size: new Blob([data.cert_data]).size,
+        is_auto_extracted: true
+      });
+    } else {
+      // PEM/CRT/CER — store as-is
+      newFiles.push({
+        filename: data.original_filename,
+        format: 'pem',
+        file_data: data.cert_data,
+        password: '',
+        description: '',
+        file_size: data.original_size,
+        is_auto_extracted: false
+      });
+    }
+    // In edit mode, append to pending; in create mode, replace
+    if (editMode) {
+      pendingFiles.push(...newFiles);
+    } else {
+      pendingFiles = newFiles;
+    }
+    // Re-render: in edit mode show stored + pending, in create mode show pending only
+    if (editMode && currentCertId) {
+      loadCertFiles(currentCertId);
+    } else {
+      renderPendingFiles();
+    }
+
     if (data.expiration_date) $('certExpiry').value = data.expiration_date;
     if (data.name && !$('certName').value) $('certName').value = data.name;
     if (data.fqdn && !$('certFqdn').value) $('certFqdn').value = data.fqdn;
-    if (password && !$('certPassword').value) $('certPassword').value = password;
+    if (password) $('certPassword').value = password;
 
     $('fileLabel').textContent = file.name + (isPfx(file) ? ' (cert extracted)' : '');
     $('fileDrop').classList.add('file-drop-loaded');
@@ -677,6 +746,45 @@ $('deleteConfirmBtn').addEventListener('click', async () => {
 $('search').addEventListener('input', renderTable);
 $('filterStatus').addEventListener('change', renderTable);
 
+// Download dropdown toggle (event delegation, position: fixed to escape overflow:hidden)
+document.addEventListener('click', e => {
+  // Close any open dropdown first
+  document.querySelectorAll('.dl-dropdown-menu.open').forEach(m => {
+    if (!m.contains(e.target) && !e.target.closest('.dl-dropdown-toggle')) {
+      m.classList.remove('open');
+    }
+  });
+
+  const toggle = e.target.closest('.dl-dropdown-toggle');
+  if (!toggle) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const menu = toggle.nextElementSibling;
+  if (!menu) return;
+
+  const isOpen = menu.classList.contains('open');
+  // Close all menus
+  document.querySelectorAll('.dl-dropdown-menu.open').forEach(m => m.classList.remove('open'));
+
+  if (!isOpen) {
+    // Position relative to the button
+    const rect = toggle.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.right = (window.innerWidth - rect.right) + 'px';
+    menu.style.left = '';
+    menu.classList.add('open');
+
+    // If menu goes off-screen bottom, show above instead
+    requestAnimationFrame(() => {
+      const menuRect = menu.getBoundingClientRect();
+      if (menuRect.bottom > window.innerHeight) {
+        menu.style.top = (rect.top - menuRect.height - 4) + 'px';
+      }
+    });
+  }
+});
+
 // Password reveal toggles in the table (event delegation)
 $('certBody').addEventListener('click', e => {
   const btn = e.target.closest('.pw-toggle');
@@ -688,6 +796,172 @@ $('certBody').addEventListener('click', e => {
   mask.dataset.showing = showing ? 'false' : 'true';
   btn.querySelector('.icon-eye').style.display = showing ? '' : 'none';
   btn.querySelector('.icon-eye-off').style.display = showing ? 'none' : '';
+});
+
+// --- Certificate Files ---
+function formatFileSize(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderPendingFiles() {
+  if (!pendingFiles.length) {
+    $('certFilesSection').style.display = 'none';
+    return;
+  }
+  $('certFilesSection').style.display = '';
+  $('certFilesUpload').style.display = 'none';
+  $('certFilesList').innerHTML = pendingFiles.map((f, i) => `
+    <div class="cert-file-entry">
+      <span class="format-badge format-badge-${f.format}">${f.format}</span>
+      <span class="file-name" title="${esc(f.filename)}">${esc(f.filename)}</span>
+      <span class="file-size">${formatFileSize(f.file_size)}</span>
+      ${f.is_auto_extracted ? '<span class="file-auto">auto</span>' : ''}
+      <button type="button" class="btn btn-icon danger" onclick="removePendingFile(${i})" title="Remove">&#128465;</button>
+    </div>
+  `).join('');
+}
+
+window.removePendingFile = function(index) {
+  pendingFiles.splice(index, 1);
+  renderPendingFiles();
+};
+
+async function loadCertFiles(certId) {
+  try {
+    const res = await fetch(`/api/certificates/${certId}/files`);
+    if (!res.ok) return;
+    const files = await res.json();
+    renderStoredFiles(certId, files);
+  } catch (_) {}
+}
+
+function renderStoredFiles(certId, files) {
+  const isViewer = window.userRole === 'viewer';
+  $('certFilesSection').style.display = '';
+  $('certFilesUpload').style.display = isViewer ? 'none' : '';
+
+  if (!files.length && !pendingFiles.length) {
+    $('certFilesList').innerHTML = '<span style="color:var(--text-muted);font-size:13px">No files stored</span>';
+    return;
+  }
+
+  const storedHtml = files.map(f => `
+    <div class="cert-file-entry">
+      <span class="format-badge format-badge-${f.format}">${f.format}</span>
+      <span class="file-name" title="${esc(f.filename)}${f.description ? ' — ' + esc(f.description) : ''}">${esc(f.filename)}</span>
+      <span class="file-size">${formatFileSize(f.file_size)}</span>
+      ${f.is_auto_extracted ? '<span class="file-auto">auto</span>' : ''}
+      ${f.password ? '<span class="cert-file-pw" title="Has password">&#128274;</span>' : ''}
+      <a class="btn btn-icon" href="/api/certificates/${certId}/files/${f.id}/download" download title="Download">&#8659;</a>
+      ${isViewer ? '' : `<button type="button" class="btn btn-icon danger" onclick="deleteCertFile(${certId}, ${f.id})" title="Delete">&#128465;</button>`}
+    </div>
+  `).join('');
+
+  const pendingHtml = pendingFiles.map((f, i) => `
+    <div class="cert-file-entry" style="border-left:3px solid #f59e0b">
+      <span class="format-badge format-badge-${f.format}">${f.format}</span>
+      <span class="file-name" title="${esc(f.filename)}">${esc(f.filename)}</span>
+      <span class="file-size">${formatFileSize(f.file_size)}</span>
+      <span class="file-auto">pending</span>
+      <button type="button" class="btn btn-icon danger" onclick="removePendingFile(${i})" title="Remove">&#128465;</button>
+    </div>
+  `).join('');
+
+  $('certFilesList').innerHTML = storedHtml + pendingHtml;
+}
+
+window.deleteCertFile = async function(certId, fileId) {
+  if (!confirm('Delete this file?')) return;
+  await api('DELETE', `/certificates/${certId}/files/${fileId}`);
+  loadCertFiles(certId);
+};
+
+// Additional file upload handler
+let additionalPendingFile = null; // holds file awaiting password entry
+
+async function uploadAdditionalFile(file, password) {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (password) formData.append('password', password);
+
+  const res = await fetch(`/api/certificates/${currentCertId}/files`, { method: 'POST', body: formData });
+  const data = await res.json();
+
+  if (!res.ok) {
+    if (data.needsPassword) {
+      // PFX needs a password — show the password field
+      additionalPendingFile = file;
+      $('additionalFilePassword').style.display = '';
+      $('addFilePassword').placeholder = password
+        ? 'Incorrect password — try again'
+        : 'This PFX requires a password';
+      $('addFilePassword').value = '';
+      $('addFilePassword').focus();
+      return;
+    }
+    // Other error
+    alert(data.error || 'Failed to upload file');
+    return;
+  }
+
+  // Success — reset and reload
+  additionalPendingFile = null;
+  $('additionalFile').value = '';
+  $('addFilePassword').value = '';
+  $('additionalFilePassword').style.display = 'none';
+  $('addFilePassword').placeholder = 'File password (if different from cert)';
+  loadCertFiles(currentCertId);
+}
+
+$('additionalFile').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file || !currentCertId) return;
+
+  const ext = (file.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase() || '';
+  const isPfxFile = ['pfx', 'p12'].includes(ext);
+
+  if (isPfxFile) {
+    // Show password field right away for PFX files
+    additionalPendingFile = file;
+    $('additionalFilePassword').style.display = '';
+    $('addFilePassword').placeholder = 'PFX password (leave blank to use cert password)';
+    $('addFilePassword').value = '';
+    $('addFilePassword').focus();
+  } else {
+    // Non-PFX — upload directly
+    await uploadAdditionalFile(file, '');
+  }
+});
+
+// Submit additional file password (button or Enter)
+$('addFilePassword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (additionalPendingFile) uploadAdditionalFile(additionalPendingFile, $('addFilePassword').value);
+  }
+});
+
+// Upload button for additional file with password
+$('addFileParseBtn').addEventListener('click', () => {
+  if (additionalPendingFile) uploadAdditionalFile(additionalPendingFile, $('addFilePassword').value);
+});
+
+const additionalFileDrop = $('additionalFileDrop');
+additionalFileDrop?.addEventListener('dragover', e => { e.preventDefault(); additionalFileDrop.classList.add('file-drop-hover'); });
+additionalFileDrop?.addEventListener('dragleave', () => additionalFileDrop.classList.remove('file-drop-hover'));
+additionalFileDrop?.addEventListener('drop', e => {
+  e.preventDefault();
+  additionalFileDrop.classList.remove('file-drop-hover');
+  const file = e.dataTransfer.files[0];
+  if (file) {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    $('additionalFile').files = dt.files;
+    $('additionalFile').dispatchEvent(new Event('change'));
+  }
 });
 
 // Password show/hide toggle in the form

@@ -1141,3 +1141,43 @@ td.empty {
   letter-spacing: 0.5px;
   vertical-align: middle;
 }
+
+/* Certificate files list */
+.cert-files-list { display: flex; flex-direction: column; gap: 6px; }
+.cert-file-entry {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; background: var(--bg-secondary); border-radius: 6px;
+  font-size: 13px;
+}
+.cert-file-entry .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cert-file-entry .file-size { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.cert-file-entry .file-auto { color: var(--text-muted); font-size: 11px; font-style: italic; }
+.format-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+}
+.format-badge-pfx { background: #fef3c7; color: #92400e; }
+.format-badge-pem { background: #d1fae5; color: #065f46; }
+.format-badge-der { background: #dbeafe; color: #1e40af; }
+.format-badge-cer { background: #ede9fe; color: #5b21b6; }
+.format-badge-p7b { background: #fce7f3; color: #9d174d; }
+.file-drop-small {
+  padding: 10px 16px; font-size: 13px; min-height: auto;
+  border-style: dashed; cursor: pointer;
+}
+.file-drop-small svg { display: none; }
+.cert-file-pw { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+
+/* Download dropdown (fixed position to escape overflow:hidden) */
+.dl-dropdown { position: relative; display: inline-block; }
+.dl-dropdown-menu {
+  display: none; position: fixed; z-index: 9999;
+  background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25); min-width: 240px; padding: 4px 0;
+}
+.dl-dropdown-menu.open { display: block; }
+.dl-dropdown-item {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  font-size: 13px; color: var(--text-primary); text-decoration: none; white-space: nowrap;
+}
+.dl-dropdown-item:hover { background: var(--bg-secondary); }
